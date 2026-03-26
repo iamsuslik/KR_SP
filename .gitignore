@@ -39,3 +39,14 @@
 
 # debug information files
 *.dwo
+
+data/
+
+prog
+my_db_app
+
+.vscode/
+.idea/
+cmake-build-debug/
+bin/
+obj/
