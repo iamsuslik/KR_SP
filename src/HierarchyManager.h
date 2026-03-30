@@ -17,6 +17,7 @@ public:
     Result createDatabase(const std::string& db_name);
     Result dropDatabase(const std::string& db_name);
     Result useDatabase(const std::string& db_name);
+    Result prepareTablePath(const std::string& table_name, std::string& out_path) const;
 
     // Вспомогательный метод: узнать, какая БД сейчас выбрана
     std::string getCurrentDB() const;
