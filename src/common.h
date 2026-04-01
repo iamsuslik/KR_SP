@@ -3,8 +3,29 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
+#include <cstring>
 
 const int PAGE_SIZE = 4096; 
+
+const int MAX_COLUMNS = 10;
+
+const int SLOT_SIZE = 128;
+
+struct ColumnSchema {
+    char name[32];
+    uint8_t type;
+    bool is_indexed;
+    bool is_not_null;
+};
+
+struct TableHeader {
+    uint32_t column_count;
+    uint32_t root_page_id;
+    ColumnSchema columns[MAX_COLUMNS];
+
+    char padding[PAGE_SIZE - 8 - (sizeof(ColumnSchema) * MAX_COLUMNS)];
+};
 
 enum class DataType {
     INT,

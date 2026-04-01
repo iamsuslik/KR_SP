@@ -5,7 +5,7 @@
 
 namespace fs = std::filesystem;
 
-std::streampos get_page_offset(uint32_t page_id) const {
+std::streampos Pager::get_page_offset(uint32_t page_id) const {
     return static_cast<std::streampos>(page_id) * PAGE_SIZE;
 }
 
