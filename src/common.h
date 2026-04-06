@@ -6,14 +6,27 @@
 #include <cstdint>
 #include <cstring>
 
-const int PAGE_SIZE = 4096; 
 
+const int PAGE_SIZE = 4096;
 const int MAX_COLUMNS = 10;
+const int MAX_NAME_LEN = 32;     // Макс. длина имени колонки
+const int TYPE_INT_SIZE = 4;
+const int TYPE_STR_SIZE = 64;
 
-const int SLOT_SIZE = 128;
+struct RecordID {
+    uint32_t page_id;
+    uint32_t slot_id;
+};
 
+struct Result {
+    bool success;
+    std::string message;
+    RecordID rid;
+};
+
+#pragma pack(push, 1)
 struct ColumnSchema {
-    char name[32];
+    char name[MAX_NAME_LEN];
     uint8_t type;
     bool is_indexed;
     bool is_not_null;
@@ -22,10 +35,12 @@ struct ColumnSchema {
 struct TableHeader {
     uint32_t column_count;
     uint32_t root_page_id;
+    uint32_t row_size;
     ColumnSchema columns[MAX_COLUMNS];
 
-    char padding[PAGE_SIZE - 8 - (sizeof(ColumnSchema) * MAX_COLUMNS)];
+    char padding [PAGE_SIZE - (sizeof(uint32_t) * 3) - (sizeof(ColumnSchema) * MAX_COLUMNS)];
 };
+#pragma pack(pop)
 
 enum class DataType {
     INT,

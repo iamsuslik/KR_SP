@@ -8,21 +8,13 @@
 
 class TableManager {
 public:
-    static Result createTable(const std::string& db_path, 
-                             const std::string& table_name, 
-                             const std::vector<ColumnDef>& columns);
+    static Result createTable(const std::string& full_path, 
+                             const TableSchema& schema);
 
-    static Result showSchema(const std::string& db_path,
-                            const std::string& table_name);
-    
-    static Result dropTable(const std::string& db_path,
-                            const std::string& table_name);
-
-    static Result insertRow(const std::string& db_path, 
-                           const std::string& table_name, 
+    static Result insertRow(const std::string& full_path, 
                            const Row& row);
 private:
-    static void serializeRow(const Row& row, char* out_slot);
+    static void serializeRow(const Row& row, char* out_slot, uint32_t row_size);
 };
 
 #endif // TABLE_MANAGER_H

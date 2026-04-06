@@ -7,35 +7,32 @@
 int main(int argc, char* argv[]) {
     HierarchyManager hm;
 
-    std::string testDB = "university_db";
-    std::string testTable = "students";
+    hm.createDatabase("university_db");
+    hm.useDatabase("university_db");
 
-    hm.createDatabase(testDB);
-    hm.useDatabase(testDB);
-
-    std::string currentPath = "data/" + hm.getCurrentDB();
-
-    std::vector<ColumnDef> studentsCols = {
+    std::vector<ColumnDef> cols = {
         ColumnDef("id", DataType::INT, true, true),
         ColumnDef("name", DataType::STR, false, true),
         ColumnDef("age", DataType::INT, false, false)
     };
+    TableSchema studentsTable("students", cols);
+
+    std::string fullPath;
+    hm.prepareTablePath(studentsTable.table_name, fullPath);
 
     std::cout << "--- Executing Step 3 & 4: Table and Insert Test ---\n";
 
-
-    Result createRes = TableManager::createTable(currentPath, testTable, studentsCols);
+    Result createRes = TableManager::createTable(fullPath, studentsTable);
     std::cout << "[TableManager] Create: " << createRes.message << "\n";
 
     if (createRes.success) {
-        TableManager::showSchema(currentPath, testTable);
 
         Row student1;
-        student1.push_back(Value(1));      // id
-        student1.push_back(Value("Ivan")); // name
-        student1.push_back(Value(20));     // age
+        student1.push_back(Value(1));      
+        student1.push_back(Value("Ivan")); 
+        student1.push_back(Value(20));     
 
-        Result insRes = TableManager::insertRow(currentPath, testTable, student1);
+        Result insRes = TableManager::insertRow(fullPath, student1);
         std::cout << "[TableManager] Insert Row: " << insRes.message << "\n";
     }
     
@@ -43,15 +40,10 @@ int main(int argc, char* argv[]) {
 
     if (argc == 1) {
         std::cout << "Starting Simple DBMS in INTERACTIVE mode..." << std::endl;
-        std::cout << "Wait for next steps to implement SQL parser.\n";
     } 
     else if (argc == 2) {
-        std::string scriptPath = argv[1];
-        std::cout << "Starting Simple DBMS in BATCH mode. Script: " << scriptPath << std::endl;
+        std::cout << "Starting Simple DBMS in BATCH mode. Script: " << argv[1] << std::endl;
     } 
-    else {
-        std::cerr << "Usage: ./prog [script.txt]" << std::endl;
-    }
     
     return 0;
 }

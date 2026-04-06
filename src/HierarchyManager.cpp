@@ -52,22 +52,45 @@ Result HierarchyManager::useDatabase(const std::string& db_name) {
     return {true, "Database changed to '" + db_name + "'."};
 }
 
-Result HierarchyManager::prepareTablePath(const std::string& table_name, std::string& out_path) const 
-{
-    if (current_db.empty()) {
-        return {false, "Error: No database selected."};
-    }
+std::string HierarchyManager::getCurrentDB() const {
+    return current_db;
+}
 
+Result HierarchyManager::getPathForCreate(const std::string& table_name, std::string& out_path) const {
+    if (current_db.empty()) return {false, "Error: No database selected."};
+    
     fs::path table_path = fs::path(ROOT_DIR) / current_db / (table_name + ".db");
-
+    
     if (fs::exists(table_path)) {
         return {false, "Error: Table '" + table_name + "' already exists."};
     }
-
+    
     out_path = table_path.string();
-    return {true, "Path prepared"};
+    return {true, "Path prepared for creation."};
 }
 
-std::string HierarchyManager::getCurrentDB() const {
-    return current_db;
+Result HierarchyManager::getPathForExisting(const std::string& table_name, std::string& out_path) const {
+    if (current_db.empty()) return {false, "Error: No database selected."};
+    
+    fs::path table_path = fs::path(ROOT_DIR) / current_db / (table_name + ".db");
+    
+    if (!fs::exists(table_path)) {
+        return {false, "Error: Table '" + table_name + "' does not exist."};
+    }
+    
+    out_path = table_path.string();
+    return {true, "Path found."};
+}
+
+Result HierarchyManager::dropTable(const std::string& table_name) {
+    if (current_db.empty()) return {false, "Error: No database selected."};
+
+    fs::path table_path = fs::path(ROOT_DIR) / current_db / (table_name + ".db");
+    
+    if (!fs::exists(table_path)) {
+        return {false, "Error: Table '" + table_name + "' does not exist."};
+    }
+
+    fs::remove(table_path);
+    return {true, "Table '" + table_name + "' successfully dropped."};
 }
