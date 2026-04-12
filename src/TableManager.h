@@ -14,7 +14,7 @@ public:
     static Result insertRow(const std::string& full_path, 
                            const Row& row);
 private:
-    static void serializeRow(const Row& row, char* out_slot, uint32_t row_size);
+    static Result serializeRow(const Row& input_row, char* out_slot, const TableHeader& header);
 };
 
 #endif // TABLE_MANAGER_H

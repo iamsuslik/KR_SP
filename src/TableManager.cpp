@@ -111,3 +111,4 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
         return {false, "Creation failed: " + std::string(e.what()), {0, 0}};
     }
 }
+

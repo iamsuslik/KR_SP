@@ -12,6 +12,7 @@ const int MAX_COLUMNS = 10;
 const int MAX_NAME_LEN = 32;     // Макс. длина имени колонки
 const int TYPE_INT_SIZE = 4;
 const int TYPE_STR_SIZE = 64;
+const int MAX_KEYS_INDEX = 200; 
 
 struct RecordID {
     uint32_t page_id;
@@ -40,6 +41,22 @@ struct TableHeader {
 
     char padding [PAGE_SIZE - (sizeof(uint32_t) * 3) - (sizeof(ColumnSchema) * MAX_COLUMNS)];
 };
+
+struct IndexPage {
+    uint32_t page_id;
+    uint32_t parent_id;
+    uint32_t next_page_id;
+    uint32_t keys_count;
+    bool is_leaf;
+
+    int keys[MAX_KEYS_INDEX]; 
+
+    uint32_t children[MAX_KEYS_INDEX + 1]; 
+    uint16_t slots[MAX_KEYS_INDEX]; 
+
+    char padding[PAGE_SIZE - 2021]; 
+};
+
 #pragma pack(pop)
 
 enum class DataType {
@@ -79,11 +96,5 @@ struct Value {
 };
 
 using Row = std::vector<Value>;
-
-
-struct Result {
-    bool success;
-    std::string message;
-};
 
 #endif // COMMON_H
