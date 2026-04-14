@@ -5,8 +5,8 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
-#include "common.h"
 #include <filesystem>
+#include "../../shared/include/common.h"
 
 namespace fs = std::filesystem;
 

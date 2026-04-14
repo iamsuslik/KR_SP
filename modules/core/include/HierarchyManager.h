@@ -2,7 +2,7 @@
 #define HIERARCHY_MANAGER_H
 
 #include <string>
-#include "common.h"
+#include "../../shared/include/common.h"
 
 class HierarchyManager {
 private:

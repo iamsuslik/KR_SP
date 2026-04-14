@@ -1,4 +1,4 @@
-#include "HierarchyManager.h"
+#include "../include/HierarchyManager.h"
 #include <filesystem>
 #include <iostream>
 #include <fstream>

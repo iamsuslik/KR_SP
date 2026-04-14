@@ -1,8 +1,8 @@
 #include <iostream>
 #include <vector>
-#include "common.h"
-#include "HierarchyManager.h"
-#include "TableManager.h"
+#include "modules/shared/include/common.h"
+#include "modules/core/include/HierarchyManager.h"
+#include "modules/logic/include/TableManager.h"
 
 int main(int argc, char* argv[]) {
     HierarchyManager hm;
