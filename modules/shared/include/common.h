@@ -95,6 +95,14 @@ struct Value {
     Value() : type(DataType::INT), is_null(true) {}
 };
 
+struct Condition {
+    std::string column;
+    std::string op;     // "==", "!=", "<", ">", "LIKE", "BETWEEN"
+    std::string val1;
+    std::string val2;   // Для BETWEEN
+    bool active = false; 
+};
+
 using Row = std::vector<Value>;
 
 #endif // COMMON_H
