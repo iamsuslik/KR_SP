@@ -13,8 +13,9 @@ public:
     static Result insertRow(const std::string& full_path, const Row& row);
 
     static Result executeSelect(const std::string& full_path, 
-                               const Condition& cond, 
-                               const std::map<std::string, std::string>& aliases = {});
+                           const Condition& cond, 
+                           const std::vector<std::string>& selectedCols = {},
+                           const std::map<std::string, std::string>& aliases = {});
     
     static Result executeUpdate(const std::string& full_path, 
                                const Condition& cond, 

@@ -221,24 +221,31 @@ void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyMa
 
 void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     std::string tableName;
+    std::vector<std::string> selectedCols;
     std::map<std::string, std::string> aliases;
     size_t fromIdx = 0;
 
     for (size_t i = 0; i < tokens.size(); ++i) {
-        if (toUpper(tokens[i]) == "FROM") { fromIdx = i; tableName = tokens[i + 1]; break; }
+        if (toUpper(tokens[i]) == "FROM") { fromIdx = i; tableName = tokens[i+1]; break; }
     }
 
-    for (size_t i = 1; i < fromIdx; ++i) {
-        if (toUpper(tokens[i]) == "AS") {
-            std::string alias = tokens[i + 1];
-            if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
-            aliases[tokens[i - 1]] = alias;
+    if (tokens[1] != "*") {
+        for (size_t i = 1; i < fromIdx; ++i) {
+            if (tokens[i] == ",") continue;
+            if (toUpper(tokens[i]) == "AS") {
+                std::string alias = tokens[i+1];
+                if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
+                aliases[tokens[i-1]] = alias;
+                i++;
+            } else {
+                selectedCols.push_back(tokens[i]);
+            }
         }
     }
 
     auto res = hm.resolveTablePath(tableName);
     if (res.success && res.message == "EXIST") {
-        TableManager::executeSelect(res.path, parseWhere(tokens), aliases);
+        TableManager::executeSelect(res.path, parseWhere(tokens), selectedCols, aliases);
     } else std::cout << "[Error] Table not found.\n";
 }
 

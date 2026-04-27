@@ -139,13 +139,18 @@ bool TableManager::matches(const Row& row, const TableHeader& header, const Cond
     return false;
 }
 
-Result TableManager::executeSelect(const std::string& full_path, const Condition& cond, const std::map<std::string, std::string>& aliases) {
+Result TableManager::executeSelect(const std::string& full_path, 
+                                 const Condition& cond, 
+                                 const std::vector<std::string>& selectedCols,
+                                 const std::map<std::string, std::string>& aliases) {
     try {
         Pager pager(full_path);
         TableHeader header;
         pager.read_page(0, &header);
 
-        std::cout << "[" << std::endl;
+        if (pager.get_page_count() < 2) { std::cout << "[]\n"; return {true, "Empty"}; }
+
+        std::cout << "[\n";
         bool first_obj = true;
         char page_buffer[PAGE_SIZE];
 
@@ -155,36 +160,44 @@ Result TableManager::executeSelect(const std::string& full_path, const Condition
             for (int i = 0; i < slots; ++i) {
                 char* slot_ptr = page_buffer + (i * header.row_size);
                 bool occupied; std::memcpy(&occupied, slot_ptr, sizeof(bool));
-                if (occupied) {
-                    Row currentRow;
-                    int offset = sizeof(bool) + sizeof(uint16_t);
-                    for (uint32_t c = 0; c < header.column_count; ++c) {
-                        if (header.columns[c].type == 0) {
-                            int iv; std::memcpy(&iv, slot_ptr + offset, TYPE_INT_SIZE);
-                            currentRow.push_back(Value(iv)); offset += TYPE_INT_SIZE;
-                        } else {
-                            char sv[TYPE_STR_SIZE] = {0}; std::memcpy(sv, slot_ptr + offset, TYPE_STR_SIZE);
-                            currentRow.push_back(Value(std::string(sv))); offset += TYPE_STR_SIZE;
-                        }
-                    }
+                if (!occupied) continue;
 
-                    if (matches(currentRow, header, cond)) {
-                        if (!first_obj) std::cout << "," << std::endl;
-                        std::cout << "  { ";
-                        for (uint32_t c = 0; c < header.column_count; ++c) {
-                            std::string name = header.columns[c].name;
-                            if (aliases.count(name)) name = aliases.at(name);
-                            std::cout << "\"" << name << "\": " << (currentRow[c].type == DataType::INT ? std::to_string(currentRow[c].int_val) : "\"" + currentRow[c].str_val + "\"");
-                            if (c < header.column_count - 1) std::cout << ", ";
-                        }
-                        std::cout << " }"; first_obj = false;
+                Row currentRow;
+                int off = ROW_METADATA_SIZE;
+                for (uint32_t c = 0; c < header.column_count; ++c) {
+                    if (header.columns[c].type == 0) {
+                        int v; std::memcpy(&v, slot_ptr + off, 4); currentRow.push_back(Value(v)); off += 4;
+                    } else {
+                        char s[64] = {0}; std::memcpy(s, slot_ptr + off, 64); currentRow.push_back(Value(std::string(s))); off += 64;
                     }
+                }
+
+                if (matches(currentRow, header, cond)) {
+                    if (!first_obj) std::cout << ",\n";
+                    std::cout << "  { ";
+                    bool first_col = true;
+                    for (uint32_t c = 0; c < header.column_count; ++c) {
+                        std::string colName = header.columns[c].name;
+
+                        bool shouldPrint = selectedCols.empty();
+                        for(const auto& sc : selectedCols) if(sc == colName) shouldPrint = true;
+
+                        if (shouldPrint) {
+                            if (!first_col) std::cout << ", ";
+                            std::string outName = aliases.count(colName) ? aliases.at(colName) : colName;
+                            std::cout << "\"" << outName << "\": ";
+                            if (currentRow[c].type == DataType::INT) std::cout << currentRow[c].int_val;
+                            else std::cout << "\"" << currentRow[c].str_val << "\"";
+                            first_col = false;
+                        }
+                    }
+                    std::cout << " }"; first_obj = false;
                 }
             }
         }
-        std::cout << "\n]" << std::endl;
-        return {true, "Success", {0,0}};
-    } catch (const std::exception& e) { return {false, e.what(), {0,0}}; }
+        std::cout << "\n]\n";
+        return {true, "Success"};
+    } catch (...) { return {false, "Error during select"}; }
 }
 
 Result TableManager::executeUpdate(const std::string& full_path, const Condition& cond, const std::string& targetCol, const std::string& newVal) {
