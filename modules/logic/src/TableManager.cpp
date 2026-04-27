@@ -32,9 +32,9 @@ Result TableManager::serializeRow(const Row& input_row, char* out_slot, const Ta
             if (col_schema.type == 0) {
                 std::memcpy(out_slot + offset, &val->int_val, TYPE_INT_SIZE);
                 offset += TYPE_INT_SIZE;
-            } else { // STR
+            } else {
                 std::strncpy(out_slot + offset, val->str_val.c_str(), TYPE_STR_SIZE - 1);
-                out_slot[offset + TYPE_STR_SIZE - 1] = '\0'; 
+                out_slot[offset + TYPE_STR_SIZE - 1] = '\0';
                 offset += TYPE_STR_SIZE;
             }
         } else {
@@ -54,7 +54,7 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
 
         header.column_count = (uint32_t)schema.columns.size();
 
-        uint32_t calc_size = sizeof(bool) + sizeof(uint16_t); 
+        uint32_t calc_size = ROW_METADATA_SIZE; 
         for (const auto& col : schema.columns) {
             calc_size += (col.type == DataType::INT) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
         }
@@ -83,6 +83,7 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
 
         char page_buffer[PAGE_SIZE];
         int slots_per_page = PAGE_SIZE / header.row_size;
+
 
         for (uint32_t p_id = 1; p_id < pager.get_page_count(); ++p_id) {
             pager.read_page(p_id, page_buffer);
@@ -116,7 +117,7 @@ bool TableManager::matches(const Row& row, const TableHeader& header, const Cond
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (std::string(header.columns[i].name) == cond.column) { colIdx = i; break; }
     }
-    if (colIdx == -1) return false;
+    if (colIdx == -1 || colIdx >= (int)row.size()) return false;
 
     const Value& val = row[colIdx];
     try {
@@ -133,22 +134,31 @@ bool TableManager::matches(const Row& row, const TableHeader& header, const Cond
         } else {
             std::string v = val.str_val;
             if (cond.op == "==") return v == cond.val1;
+            if (cond.op == "!=") return v != cond.val1;
             if (cond.op == "LIKE") return std::regex_match(v, std::regex(cond.val1));
         }
     } catch (...) { return false; }
     return false;
 }
 
-Result TableManager::executeSelect(const std::string& full_path, 
-                                 const Condition& cond, 
-                                 const std::vector<std::string>& selectedCols,
-                                 const std::map<std::string, std::string>& aliases) {
+Result TableManager::executeSelect(const std::string& full_path, const Condition& cond, const std::vector<std::string>& selectedCols, const std::map<std::string, std::string>& aliases) {
     try {
         Pager pager(full_path);
         TableHeader header;
         pager.read_page(0, &header);
 
         if (pager.get_page_count() < 2) { std::cout << "[]\n"; return {true, "Empty"}; }
+
+        std::vector<uint32_t> colsToPrint;
+        if (selectedCols.empty()) {
+            for (uint32_t c = 0; c < header.column_count; ++c) colsToPrint.push_back(c);
+        } else {
+            for (const auto& sc : selectedCols) {
+                for (uint32_t c = 0; c < header.column_count; ++c) {
+                    if (header.columns[c].name == sc) { colsToPrint.push_back(c); break; }
+                }
+            }
+        }
 
         std::cout << "[\n";
         bool first_obj = true;
@@ -162,42 +172,36 @@ Result TableManager::executeSelect(const std::string& full_path,
                 bool occupied; std::memcpy(&occupied, slot_ptr, sizeof(bool));
                 if (!occupied) continue;
 
+
                 Row currentRow;
                 int off = ROW_METADATA_SIZE;
                 for (uint32_t c = 0; c < header.column_count; ++c) {
                     if (header.columns[c].type == 0) {
-                        int v; std::memcpy(&v, slot_ptr + off, 4); currentRow.push_back(Value(v)); off += 4;
+                        int v; std::memcpy(&v, slot_ptr + off, TYPE_INT_SIZE); 
+                        currentRow.push_back(Value(v)); off += TYPE_INT_SIZE;
                     } else {
-                        char s[64] = {0}; std::memcpy(s, slot_ptr + off, 64); currentRow.push_back(Value(std::string(s))); off += 64;
+                        char s[TYPE_STR_SIZE] = {0}; std::memcpy(s, slot_ptr + off, TYPE_STR_SIZE); 
+                        currentRow.push_back(Value(std::string(s))); off += TYPE_STR_SIZE;
                     }
                 }
 
                 if (matches(currentRow, header, cond)) {
                     if (!first_obj) std::cout << ",\n";
                     std::cout << "  { ";
-                    bool first_col = true;
-                    for (uint32_t c = 0; c < header.column_count; ++c) {
-                        std::string colName = header.columns[c].name;
-
-                        bool shouldPrint = selectedCols.empty();
-                        for(const auto& sc : selectedCols) if(sc == colName) shouldPrint = true;
-
-                        if (shouldPrint) {
-                            if (!first_col) std::cout << ", ";
-                            std::string outName = aliases.count(colName) ? aliases.at(colName) : colName;
-                            std::cout << "\"" << outName << "\": ";
-                            if (currentRow[c].type == DataType::INT) std::cout << currentRow[c].int_val;
-                            else std::cout << "\"" << currentRow[c].str_val << "\"";
-                            first_col = false;
-                        }
+                    for (size_t j = 0; j < colsToPrint.size(); ++j) {
+                        uint32_t cIdx = colsToPrint[j];
+                        std::string colName = header.columns[cIdx].name;
+                        std::string outName = aliases.count(colName) ? aliases.at(colName) : colName;
+                        std::cout << "\"" << outName << "\": " << (currentRow[cIdx].type == DataType::INT ? std::to_string(currentRow[cIdx].int_val) : "\"" + currentRow[cIdx].str_val + "\"");
+                        if (j < colsToPrint.size() - 1) std::cout << ", ";
                     }
                     std::cout << " }"; first_obj = false;
                 }
             }
         }
         std::cout << "\n]\n";
-        return {true, "Success"};
-    } catch (...) { return {false, "Error during select"}; }
+        return {true, "Success", {0,0}};
+    } catch (const std::exception& e) { return {false, e.what(), {0,0}}; }
 }
 
 Result TableManager::executeUpdate(const std::string& full_path, const Condition& cond, const std::string& targetCol, const std::string& newVal) {
@@ -215,30 +219,30 @@ Result TableManager::executeUpdate(const std::string& full_path, const Condition
             for (int i = 0; i < slots; ++i) {
                 char* slot_ptr = page_buffer + (i * header.row_size);
                 bool occupied; std::memcpy(&occupied, slot_ptr, sizeof(bool));
-                if (occupied) {
-                    Row currentRow;
-                    int offset = sizeof(bool) + sizeof(uint16_t);
-                    for (uint32_t c = 0; c < header.column_count; ++c) {
-                        if (header.columns[c].type == 0) {
-                            int iv; std::memcpy(&iv, slot_ptr + offset, TYPE_INT_SIZE);
-                            currentRow.push_back(Value(iv)); offset += TYPE_INT_SIZE;
-                        } else {
-                            char sv[TYPE_STR_SIZE] = {0}; std::memcpy(sv, slot_ptr + offset, TYPE_STR_SIZE);
-                            currentRow.push_back(Value(std::string(sv))); offset += TYPE_STR_SIZE;
-                        }
-                    }
+                if (!occupied) continue;
 
-                    if (matches(currentRow, header, cond)) {
-                        for (uint32_t c = 0; c < header.column_count; ++c) {
-                            if (std::string(header.columns[c].name) == targetCol) {
-                                if (header.columns[c].type == 0) currentRow[c] = Value(std::stoi(newVal));
-                                else currentRow[c] = Value(newVal);
-                                break;
-                            }
-                        }
-                        serializeRow(currentRow, slot_ptr, header);
-                        changed = true; count++;
+                Row currentRow;
+                int off = ROW_METADATA_SIZE;
+                for (uint32_t c = 0; c < header.column_count; ++c) {
+                    if (header.columns[c].type == 0) {
+                        int iv; std::memcpy(&iv, slot_ptr + off, TYPE_INT_SIZE);
+                        currentRow.push_back(Value(iv)); off += TYPE_INT_SIZE;
+                    } else {
+                        char sv[TYPE_STR_SIZE] = {0}; std::memcpy(sv, slot_ptr + off, TYPE_STR_SIZE);
+                        currentRow.push_back(Value(std::string(sv))); off += TYPE_STR_SIZE;
                     }
+                }
+
+                if (matches(currentRow, header, cond)) {
+                    for (uint32_t c = 0; c < header.column_count; ++c) {
+                        if (std::string(header.columns[c].name) == targetCol) {
+                            if (header.columns[c].type == 0) currentRow[c] = Value(std::stoi(newVal));
+                            else currentRow[c] = Value(newVal);
+                            break;
+                        }
+                    }
+                    serializeRow(currentRow, slot_ptr, header);
+                    changed = true; count++;
                 }
             }
             if (changed) pager.write_page(p, page_buffer);
@@ -262,24 +266,24 @@ Result TableManager::executeDelete(const std::string& full_path, const Condition
             for (int i = 0; i < slots; ++i) {
                 char* slot_ptr = page_buffer + (i * header.row_size);
                 bool occupied; std::memcpy(&occupied, slot_ptr, sizeof(bool));
-                if (occupied) {
-                    Row currentRow;
-                    int offset = sizeof(bool) + sizeof(uint16_t);
-                    for (uint32_t c = 0; c < header.column_count; ++c) {
-                        if (header.columns[c].type == 0) {
-                            int iv; std::memcpy(&iv, slot_ptr + offset, TYPE_INT_SIZE);
-                            currentRow.push_back(Value(iv)); offset += TYPE_INT_SIZE;
-                        } else {
-                            char sv[TYPE_STR_SIZE] = {0}; std::memcpy(sv, slot_ptr + offset, TYPE_STR_SIZE);
-                            currentRow.push_back(Value(std::string(sv))); offset += TYPE_STR_SIZE;
-                        }
-                    }
+                if (!occupied) continue;
 
-                    if (matches(currentRow, header, cond)) {
-                        bool new_status = false;
-                        std::memcpy(slot_ptr, &new_status, sizeof(bool));
-                        changed = true; count++;
+                Row currentRow;
+                int off = ROW_METADATA_SIZE;
+                for (uint32_t c = 0; c < header.column_count; ++c) {
+                    if (header.columns[c].type == 0) {
+                        int iv; std::memcpy(&iv, slot_ptr + off, TYPE_INT_SIZE);
+                        currentRow.push_back(Value(iv)); off += TYPE_INT_SIZE;
+                    } else {
+                        char sv[TYPE_STR_SIZE] = {0}; std::memcpy(sv, slot_ptr + off, TYPE_STR_SIZE);
+                        currentRow.push_back(Value(std::string(sv))); off += TYPE_STR_SIZE;
                     }
+                }
+
+                if (matches(currentRow, header, cond)) {
+                    bool new_status = false;
+                    std::memcpy(slot_ptr, &new_status, sizeof(bool));
+                    changed = true; count++;
                 }
             }
             if (changed) pager.write_page(p, page_buffer);
