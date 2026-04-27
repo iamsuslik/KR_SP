@@ -94,3 +94,28 @@ Result HierarchyManager::dropTable(const std::string& table_name) {
     fs::remove(table_path);
     return {true, "Table '" + table_name + "' successfully dropped."};
 }
+
+Result HierarchyManager::prepareTablePath(const std::string& input_name, std::string& out_path) const {
+    std::string db_to_use = current_db;
+    std::string table_name = input_name;
+
+    size_t dot_pos = input_name.find('.');
+    
+    if (dot_pos != std::string::npos) {
+        db_to_use = input_name.substr(0, dot_pos);
+        table_name = input_name.substr(dot_pos + 1);
+    }
+
+    if (db_to_use.empty()) {
+        return {false, "Error: No database selected and no database prefix provided.", {0,0}};
+    }
+
+    fs::path db_folder = fs::path(ROOT_DIR) / db_to_use;
+    if (!fs::exists(db_folder)) {
+        return {false, "Error: Database '" + db_to_use + "' not found.", {0,0}};
+    }
+
+    out_path = (db_folder / (table_name + ".data")).string();
+    
+    return {true, "Path successfully resolved", {0,0}};
+}

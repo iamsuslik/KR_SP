@@ -53,6 +53,7 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) {
     return tokens;
 }
 
+
 Condition SQLParser::parseWhere(const std::vector<std::string>& tokens) {
     Condition c;
     for (size_t i = 0; i < tokens.size(); ++i) {
@@ -137,56 +138,154 @@ void SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hierar
 }
 
 void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm) {
-    size_t valuePos = 0;
-    for(size_t i=0; i<tokens.size(); ++i) if(toUpper(tokens[i]) == "VALUE") valuePos = i;
-    if (valuePos == 0) return;
-
+    if (tokens.size() < 5) return;
     std::string tableName = tokens[2];
-    std::string path; 
+    std::string path;
     if (!hm.prepareTablePath(tableName, path).success) return;
 
     TableHeader header;
-    try { Pager p(path); p.read_page(0, &header); } catch(...) { return; }
-
-    Row row;
-    size_t valStart = valuePos + 2;
-    for (uint32_t i = 0; i < header.column_count; ++i) {
-        if (valStart >= tokens.size()) break;
-        std::string v = tokens[valStart];
-        if (header.columns[i].type == 0) row.push_back(Value(std::stoi(v)));
-        else {
-            if (v.front() == '"') v = v.substr(1, v.size() - 2);
-            row.push_back(Value(v));
-        }
-        valStart += 2;
+    try {
+        Pager p(path);
+        p.read_page(0, &header);
+    } catch (...) {
+        std::cout << "[Error] Table not found.\n";
+        return;
     }
-    std::cout << TableManager::insertRow(path, row).message << "\n";
+
+    std::vector<std::string> targetColNames;
+    size_t valueTokenStart = 0;
+
+    if (tokens[3] == "(") {
+        size_t i = 4;
+        while (i < tokens.size() && tokens[i] != ")") {
+            if (tokens[i] != ",") targetColNames.push_back(tokens[i]);
+            i++;
+        }
+        for (size_t j = i; j < tokens.size(); ++j) {
+            if (toUpper(tokens[j]) == "VALUE") {
+                valueTokenStart = j + 2;
+                break;
+            }
+        }
+    } else {
+        for (size_t j = 3; j < tokens.size(); ++j) {
+            if (toUpper(tokens[j]) == "VALUE") {
+                valueTokenStart = j + 2;
+                break;
+            }
+        }
+    }
+
+    if (valueTokenStart == 0 || valueTokenStart >= tokens.size()) {
+        std::cout << "[Error] Syntax error: missing VALUE (vals...)\n";
+        return;
+    }
+
+    std::vector<std::string> values;
+    size_t vIdx = valueTokenStart;
+    while (vIdx < tokens.size() && tokens[vIdx] != ")") {
+        if (tokens[vIdx] != ",") values.push_back(tokens[vIdx]);
+        vIdx++;
+    }
+
+    Row finalRow(header.column_count, Value()); 
+
+    if (!targetColNames.empty()) {
+        if (targetColNames.size() != values.size()) {
+            std::cout << "[Error] Columns (" << targetColNames.size() << ") and Values (" << values.size() << ") mismatch.\n";
+            return;
+        }
+
+        for (size_t i = 0; i < targetColNames.size(); ++i) {
+            int schemaIdx = -1;
+            for (uint32_t c = 0; c < header.column_count; ++c) {
+                if (std::string(header.columns[c].name) == targetColNames[i]) {
+                    schemaIdx = c;
+                    break;
+                }
+            }
+
+            if (schemaIdx != -1) {
+                std::string rawVal = values[i];
+                if (header.columns[schemaIdx].type == 0) { // INT
+                    finalRow[schemaIdx] = Value(std::stoi(rawVal));
+                } else { // STR
+                    if (rawVal.front() == '"') rawVal = rawVal.substr(1, rawVal.size() - 2);
+                    finalRow[schemaIdx] = Value(rawVal);
+                }
+            } else {
+                std::cout << "[Error] Column '" << targetColNames[i] << "' not found in schema.\n";
+                return;
+            }
+        }
+    } else {
+        for (uint32_t i = 0; i < header.column_count && i < values.size(); ++i) {
+            std::string rawVal = values[i];
+            if (header.columns[i].type == 0) {
+                finalRow[i] = Value(std::stoi(rawVal));
+            } else {
+                if (rawVal.front() == '"') rawVal = rawVal.substr(1, rawVal.size() - 2);
+                finalRow[i] = Value(rawVal);
+            }
+        }
+    }
+
+    Result res = TableManager::insertRow(path, finalRow);
+    std::cout << res.message << "\n";
 }
 
 void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     std::string tableName;
-    for(size_t i=0; i<tokens.size(); ++i) {
-        if(toUpper(tokens[i]) == "FROM") {
-            tableName = tokens[i+1];
+    std::map<std::string, std::string> aliases;
+    size_t fromIdx = 0;
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (toUpper(tokens[i]) == "FROM") {
+            fromIdx = i;
+            tableName = tokens[i + 1];
             break;
         }
     }
+
+    for (size_t i = 1; i < fromIdx; ++i) {
+        if (toUpper(tokens[i]) == "AS") {
+            std::string originalCol = tokens[i - 1];
+            std::string aliasName = tokens[i + 1];
+
+            if (aliasName.front() == '"') aliasName = aliasName.substr(1, aliasName.size() - 2);
+            
+            aliases[originalCol] = aliasName;
+            i++;
+        }
+    }
+
     std::string path;
     if (hm.prepareTablePath(tableName, path).success) {
-        TableManager::showAllRows(path, tableName);
+        Condition cond = parseWhere(tokens);
+        TableManager::executeSelect(path, cond, aliases);
     }
 }
 
 void SQLParser::handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     std::string tableName = tokens[2];
+    std::string path; hm.prepareTablePath(tableName, path);
     Condition cond = parseWhere(tokens);
-    std::string path;
-    if (hm.prepareTablePath(tableName, path).success) {
-        std::cout << TableManager::deleteRow(path, 1, 0).message << "\n"; 
-    }
+
+    std::cout << TableManager::executeDelete(path, cond).message << "\n";
 }
 
 void SQLParser::handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm) {
+    if (tokens.size() < 6) return;
+
     std::string tableName = tokens[1];
-    std::cout << "[Info] UPDATE recognized for " << tableName << ". Pending implementation logic.\n";
+    std::string targetCol = tokens[3];
+    std::string newVal = tokens[5];
+
+    std::string path;
+    if (hm.prepareTablePath(tableName, path).success) {
+        Condition cond = parseWhere(tokens);
+
+        Result res = TableManager::executeUpdate(path, cond, targetCol, newVal);
+        std::cout << res.message << "\n";
+    }
 }
