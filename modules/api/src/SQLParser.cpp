@@ -1,5 +1,6 @@
 #include "../include/SQLParser.h"
 #include <map>
+#include <stdexcept>
 
 std::string SQLParser::toUpper(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), ::toupper);
@@ -41,9 +42,7 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) {
         } else if (c == '=' || c == '<' || c == '>' || c == '!') {
             if (!current.empty()) tokens.push_back(current);
             std::string op(1, c);
-            if (i + 1 < query.length() && query[i+1] == '=') {
-                op += "="; i++;
-            }
+            if (i + 1 < query.length() && query[i+1] == '=') { op += "="; i++; }
             tokens.push_back(op);
             current = "";
         } else {
@@ -53,7 +52,6 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) {
     if (!current.empty()) tokens.push_back(current);
     return tokens;
 }
-
 
 Condition SQLParser::parseWhere(const std::vector<std::string>& tokens) {
     Condition c;
@@ -100,6 +98,8 @@ void SQLParser::process(std::string query, HierarchyManager& hm) {
             if (res.success && res.message == "EXIST") {
                 std::cout << TableManager::dropTable(res.path).message << "\n";
             } else std::cout << "[Error] Table not found.\n";
+        } else if (tokens.size() > 2 && toUpper(tokens[1]) == "DATABASE") {
+            std::cout << hm.dropDatabase(tokens[2]).message << "\n";
         }
     }
     else std::cout << "[Error] Unknown command.\n";
@@ -118,13 +118,9 @@ void SQLParser::handleUse(const std::vector<std::string>& tokens, HierarchyManag
 void SQLParser::handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     if (tokens.size() < 6) return;
     std::string tableName = tokens[2];
-
     auto res = hm.resolveTablePath(tableName);
     if (!res.success) { std::cout << res.message << "\n"; return; }
-    if (res.message == "EXIST") {
-        std::cout << "[Error] Table '" << tableName << "' already exists.\n";
-        return;
-    }
+    if (res.message == "EXIST") { std::cout << "[Error] Table already exists.\n"; return; }
 
     std::vector<ColumnDef> cols;
     size_t i = 4;
@@ -147,76 +143,55 @@ void SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hierar
 void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     if (tokens.size() < 5) return;
     std::string tableName = tokens[2];
-    
     auto pathRes = hm.resolveTablePath(tableName);
-    if (!pathRes.success || pathRes.message == "NEW") {
-        std::cout << "[Error] Table not found.\n";
-        return;
-    }
+    if (!pathRes.success || pathRes.message == "NEW") { std::cout << "[Error] Table not found.\n"; return; }
 
     TableHeader header;
-    try {
-        Pager p(pathRes.path);
-        p.read_page(0, &header);
-    } catch (...) {
-        std::cout << "[Error] Failed to read table schema.\n";
-        return;
-    }
+    try { Pager p(pathRes.path); p.read_page(0, &header); }
+    catch (...) { std::cout << "[Error] Schema read failed.\n"; return; }
 
     size_t valueTokenStart = 0;
     std::vector<std::string> targetColNames;
 
     if (tokens[3] == "(") {
         size_t i = 4;
-        while (i < tokens.size() && tokens[i] != ")") {
-            if (tokens[i] != ",") targetColNames.push_back(tokens[i]);
-            i++;
-        }
-        for (size_t j = i; j < tokens.size(); ++j) {
-            if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; }
-        }
+        while (i < tokens.size() && tokens[i] != ")") { if (tokens[i] != ",") targetColNames.push_back(tokens[i]); i++; }
+        for (size_t j = i; j < tokens.size(); ++j) { if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; } }
     } else {
-        for (size_t j = 3; j < tokens.size(); ++j) {
-            if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; }
-        }
+        for (size_t j = 3; j < tokens.size(); ++j) { if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; } }
     }
 
-    if (valueTokenStart == 0) { std::cout << "[Error] Syntax error: missing VALUE\n"; return; }
+    if (valueTokenStart == 0) { std::cout << "[Error] Syntax error: VALUE expected\n"; return; }
 
     std::vector<std::string> values;
     for (size_t vIdx = valueTokenStart; vIdx < tokens.size() && tokens[vIdx] != ")"; ++vIdx) {
         if (tokens[vIdx] != ",") values.push_back(tokens[vIdx]);
     }
 
-    Row finalRow(header.column_count, Value()); 
-
-    if (!targetColNames.empty()) {
-        for (size_t i = 0; i < targetColNames.size() && i < values.size(); ++i) {
-            int colIdx = -1;
-            for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == targetColNames[i]) { colIdx = c; break; }
-            }
-            if (colIdx != -1) {
-                if (header.columns[colIdx].type == 0) finalRow[colIdx] = Value(std::stoi(values[i]));
-                else {
-                    std::string s = values[i];
-                    if (s.front() == '"') s = s.substr(1, s.size()-2);
-                    finalRow[colIdx] = Value(s);
-                }
-            }
-        }
-    } else {
-        for (uint32_t i = 0; i < header.column_count && i < values.size(); ++i) {
-            if (header.columns[i].type == 0) finalRow[i] = Value(std::stoi(values[i]));
-            else {
-                std::string s = values[i];
-                if (s.front() == '"') s = s.substr(1, s.size()-2);
-                finalRow[i] = Value(s);
-            }
-        }
+    if (targetColNames.empty() && values.size() != header.column_count) {
+        std::cout << "[Error] Positional insert: value count mismatch (" << values.size() << "/" << header.column_count << ")\n";
+        return;
     }
 
-    std::cout << TableManager::insertRow(pathRes.path, finalRow).message << "\n";
+    Row finalRow(header.column_count, Value());
+    try {
+        if (!targetColNames.empty()) {
+            for (size_t i = 0; i < targetColNames.size() && i < values.size(); ++i) {
+                int cIdx = -1;
+                for (uint32_t c = 0; c < header.column_count; ++c) if (header.columns[c].name == targetColNames[i]) { cIdx = c; break; }
+                if (cIdx != -1) {
+                    if (header.columns[cIdx].type == 0) finalRow[cIdx] = Value(std::stoi(values[i]));
+                    else { std::string s = values[i]; if (s.front() == '"') s = s.substr(1, s.size()-2); finalRow[cIdx] = Value(s); }
+                }
+            }
+        } else {
+            for (uint32_t i = 0; i < header.column_count; ++i) {
+                if (header.columns[i].type == 0) finalRow[i] = Value(std::stoi(values[i]));
+                else { std::string s = values[i]; if (s.front() == '"') s = s.substr(1, s.size()-2); finalRow[i] = Value(s); }
+            }
+        }
+        std::cout << TableManager::insertRow(pathRes.path, finalRow).message << "\n";
+    } catch (...) { std::cout << "[Error] Invalid value format in INSERT.\n"; }
 }
 
 void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm) {
@@ -235,11 +210,8 @@ void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyMa
             if (toUpper(tokens[i]) == "AS") {
                 std::string alias = tokens[i+1];
                 if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
-                aliases[tokens[i-1]] = alias;
-                i++;
-            } else {
-                selectedCols.push_back(tokens[i]);
-            }
+                aliases[tokens[i-1]] = alias; i++;
+            } else selectedCols.push_back(tokens[i]);
         }
     }
 

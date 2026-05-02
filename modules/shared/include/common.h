@@ -25,8 +25,10 @@ struct TableHeader {
     uint32_t column_count;
     uint32_t root_page_id;
     uint32_t row_size;
+    uint32_t free_count;         
+    uint32_t free_list[100]; 
     ColumnSchema columns[MAX_COLUMNS];
-    char padding[PAGE_SIZE - 12 - (sizeof(ColumnSchema) * MAX_COLUMNS)];
+    char padding[PAGE_SIZE - (sizeof(uint32_t) * 4) - (sizeof(uint32_t) * 100) - (sizeof(ColumnSchema) * MAX_COLUMNS)];
 };
 #pragma pack(pop)
 
