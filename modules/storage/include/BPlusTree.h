@@ -3,7 +3,7 @@
 
 #include "../../shared/include/common.h"
 #include "../../core/include/Pager.h"
-#include "../../shared/include/comparators.h
+#include "../../shared/include/comparators.h"
 #include <vector>
 
 template <typename tkey, std::size_t t = 170, comparator<tkey> compare = std::less<tkey>>
@@ -260,8 +260,8 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
 
 
 
-template <typename tkey, std::size_t t, typename Compare>
-void BP_tree<tkey, t, Compare>::split_node(uint32_t node_id, uint32_t parent_id) {
+template <typename tkey, std::size_t t, typename compare>
+void BP_tree<tkey, t, compare>::split_node(uint32_t node_id, uint32_t parent_id) {
     alignas(4096) char buffer[PAGE_SIZE];
     _pager.read_page(node_id, buffer);
     auto* base = reinterpret_cast<bptree_node_base*>(buffer);
@@ -273,8 +273,8 @@ void BP_tree<tkey, t, Compare>::split_node(uint32_t node_id, uint32_t parent_id)
     }
 }
 
-template <typename tkey, std::size_t t, typename Compare>
-void BP_tree<tkey, t, Compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id) {
+template <typename tkey, std::size_t t, typename compare>
+void BP_tree<tkey, t, compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id) {
     alignas(4096) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
 
     _pager.read_page(leaf_id, l_buf);
@@ -313,8 +313,8 @@ void BP_tree<tkey, t, Compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id)
     _pager.write_page(parent_id, p_buf);
 }
 
-template <typename tkey, std::size_t t, typename Compare>
-void BP_tree<tkey, t, Compare>::split_middle(uint32_t mid_id, uint32_t parent_id) {
+template <typename tkey, std::size_t t, typename compare>
+void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id) {
     alignas(4096) char m_buf[PAGE_SIZE];
     alignas(4096) char n_buf[PAGE_SIZE];
     alignas(4096) char p_buf[PAGE_SIZE];
@@ -356,36 +356,29 @@ void BP_tree<tkey, t, Compare>::split_middle(uint32_t mid_id, uint32_t parent_id
 }
 
 
-template <typename tkey, std::size_t t, typename Compare>
-bool BP_tree<tkey, t, Compare>::is_node_full(const bptree_node_base* node) const {
+template <typename tkey, std::size_t t, typename compare>
+bool BP_tree<tkey, t, compare>::is_node_full(const bptree_node_base* node) const {
     return node->_count > maximum_keys_in_node;
 }
 
-template <typename tkey, std::size_t t, typename Compare>
-void BP_tree<tkey, t, Compare>::balance_insert(uint32_t curr_id, std::vector<uint32_t>& path) {
-    alignas(4096) char buffer[PAGE_SIZE];
-    _pager.read_page(curr_id, buffer);
-    auto* node = reinterpret_cast<bptree_node_base*>(buffer);
-
-    while (is_node_full(node)) {
-        if (curr_id == _root_id) {
-            grow_tree();
-            break;
-        }
-
-        path.pop_back(); 
-        uint32_t parent_id = path.back();
-
-        split_node(curr_id, parent_id);
-
-        curr_id = parent_id;
+template <typename tkey, std::size_t t, typename compare>
+void BP_tree<tkey, t, compare>::balance_insert(uint32_t curr_id, std::vector<uint32_t>& path) {
+    alignas(4096) char buffer[4096];
+    while (true) {
         _pager.read_page(curr_id, buffer);
-        node = reinterpret_cast<bptree_node_base*>(buffer);
+        if (reinterpret_cast<bptree_node_base*>(buffer)->_count <= maximum_keys_in_node) break;
+        if (curr_id == _root_id) {
+            grow_tree(); break;
+        }
+        uint32_t p_id = path.back();
+        path.pop_back();
+        split_node(curr_id, p_id);
+        curr_id = p_id;
     }
 }
 
-template <typename tkey, std::size_t t, typename Compare>
-void BP_tree<tkey, t, Compare>::grow_tree() {
+template <typename tkey, std::size_t t, typename compare>
+void BP_tree<tkey, t, compare>::grow_tree() {
     uint32_t new_root_id = _pager.allocate_page();
 
     alignas(4096) char buffer[PAGE_SIZE];
@@ -401,8 +394,8 @@ void BP_tree<tkey, t, Compare>::grow_tree() {
     split_node(old_root_id, new_root_id);
 }
 
-template <typename tkey, std::size_t t, typename Compare>
-Result BP_tree<tkey, t, Compare>::insert(const tkey& key, const RecordID& rid) {
+template <typename tkey, std::size_t t, typename compare>
+Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     if (contains(key)) {
         return {false, "Error: Duplicate key", {0,0}};
     }
