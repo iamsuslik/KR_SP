@@ -3,7 +3,7 @@
 
 #include "../../shared/include/common.h"
 #include "../../core/include/Pager.h"
-#include "../../shared/include/comparators.h"
+#include "../../shared/include/comparators.h
 #include <vector>
 
 template <typename tkey, std::size_t t = 170, comparator<tkey> compare = std::less<tkey>>
@@ -57,6 +57,7 @@ public:
         : compare(cmp), _pager(pager), _root_id(root_ref), _total_size(0) {}
 
     Result insert(const tkey& key, const RecordID& rid);
+    Result erase(const tkey& key);
     Result find(const tkey& key, RecordID& out_rid);
     bool contains(const tkey& key);
 
@@ -69,6 +70,14 @@ private:
     void split_leaf(uint32_t leaf_id, uint32_t parent_id);
     void split_middle(uint32_t mid_id, uint32_t parent_id);
     void grow_tree();
+
+    void balance_delete(uint32_t curr_id, std::vector<uint32_t>& path);
+    bool borrow_sibling(uint32_t curr_id, uint32_t parent_id);
+    void merge_sibling(uint32_t curr_id, uint32_t parent_id);
+    void shrink_root();
+    bool is_node_underfull(const bptree_node_base* node) const;
+
+    void write_node(uint32_t page_id, const void* buffer) { _pager.write_page(page_id, buffer); }
 };
 
 #endif
