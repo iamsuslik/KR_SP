@@ -408,7 +408,21 @@ Result BP_tree<tkey, t, Compare>::insert(const tkey& key, const RecordID& rid) {
     }
 
     if (_root_id == 0) {
-        init_first_root();
+        uint32_t new_root_id = _pager.allocate_page();
+        
+        alignas(4096) char buffer[PAGE_SIZE];
+        std::memset(buffer, 0, PAGE_SIZE);
+
+        auto* first_leaf = new (buffer) bptree_node_term();
+
+        first_leaf->_data[0] = std::make_pair(key, rid);
+        first_leaf->_count = 1;
+
+        _pager.write_page(new_root_id, buffer);
+
+        _root_id = new_root_id;
+
+        return {true, "First root created successfully", rid};
     }
 
     std::vector<uint32_t> path;
