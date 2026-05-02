@@ -254,4 +254,182 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
     return {false, "upper_bound: no element strictly greater than key", {0, 0}};
 }
 
+
+
+template <typename tkey, std::size_t t, typename Compare>
+void BP_tree<tkey, t, Compare>::split_node(uint32_t node_id, uint32_t parent_id) {
+    alignas(4096) char buffer[PAGE_SIZE];
+    _pager.read_page(node_id, buffer);
+    auto* base = reinterpret_cast<bptree_node_base*>(buffer);
+
+    if (base->_is_terminate) {
+        split_leaf(node_id, parent_id);
+    } else {
+        split_middle(node_id, parent_id);
+    }
+}
+
+template <typename tkey, std::size_t t, typename Compare>
+void BP_tree<tkey, t, Compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id) {
+    alignas(4096) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
+
+    _pager.read_page(leaf_id, l_buf);
+    auto* l_leaf = reinterpret_cast<bptree_node_term*>(l_buf);
+
+    uint32_t new_leaf_id = _pager.allocate_page();
+    std::memset(r_buf, 0, PAGE_SIZE);
+    auto* r_leaf = new (r_buf) bptree_node_term();
+
+    size_t j = 0;
+    for (size_t i = t; i < l_leaf->_count; ++i) {
+        r_leaf->_data[j++] = std::move(l_leaf->_data[i]);
+    }
+    r_leaf->_count = (uint32_t)j;
+    l_leaf->_count = (uint32_t)t;
+
+    r_leaf->_next = l_leaf->_next;
+    l_leaf->_next = new_leaf_id;
+
+    tkey key_to_parent = r_leaf->_data[0].first;
+
+    _pager.read_page(parent_id, p_buf);
+    auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
+    size_t pos = binary_search_in_node(parent, key_to_parent);
+
+    for (size_t k = parent->_count; k > pos; --k) {
+        parent->_keys[k] = std::move(parent->_keys[k-1]);
+        parent->_pointers[k+1] = parent->_pointers[k];
+    }
+    parent->_keys[pos] = key_to_parent;
+    parent->_pointers[pos + 1] = new_leaf_id;
+    parent->_count++;
+
+    _pager.write_page(leaf_id, l_buf);
+    _pager.write_page(new_leaf_id, r_buf);
+    _pager.write_page(parent_id, p_buf);
+}
+
+template <typename tkey, std::size_t t, typename Compare>
+void BP_tree<tkey, t, Compare>::split_middle(uint32_t mid_id, uint32_t parent_id) {
+    alignas(4096) char m_buf[PAGE_SIZE];
+    alignas(4096) char n_buf[PAGE_SIZE];
+    alignas(4096) char p_buf[PAGE_SIZE];
+
+    _pager.read_page(mid_id, m_buf);
+    auto* old_mid = reinterpret_cast<bptree_node_middle*>(m_buf);
+
+    uint32_t new_mid_id = _pager.allocate_page();
+    auto* new_mid = new (n_buf) bptree_node_middle();
+
+    tkey up_key = std::move(old_mid->_keys[t-1]);
+
+    size_t j = 0;
+    for (size_t i = t; i < old_mid->_count; ++i) {
+        new_mid->_keys[j] = std::move(old_mid->_keys[i]);
+        new_mid->_pointers[j] = old_mid->_pointers[i];
+        j++;
+    }
+    new_mid->_pointers[j] = old_mid->_pointers[old_mid->_count];
+    
+    new_mid->_count = j;
+    old_mid->_count = t - 1;
+
+    _pager.read_page(parent_id, p_buf);
+    auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
+    
+    size_t pos = binary_search_in_node(parent, up_key);
+    for (size_t k = parent->_count; k > pos; --k) {
+        parent->_keys[k] = std::move(parent->_keys[k-1]);
+        parent->_pointers[k+1] = parent->_pointers[k];
+    }
+    parent->_keys[pos] = up_key;
+    parent->_pointers[pos+1] = new_mid_id;
+    parent->_count++;
+
+    _pager.write_page(mid_id, m_buf);
+    _pager.write_page(new_mid_id, n_buf);
+    _pager.write_page(parent_id, p_buf);
+}
+
+
+template <typename tkey, std::size_t t, typename Compare>
+bool BP_tree<tkey, t, Compare>::is_node_full(const bptree_node_base* node) const {
+    return node->_count > maximum_keys_in_node;
+}
+
+template <typename tkey, std::size_t t, typename Compare>
+void BP_tree<tkey, t, Compare>::balance_insert(uint32_t curr_id, std::vector<uint32_t>& path) {
+    alignas(4096) char buffer[PAGE_SIZE];
+    _pager.read_page(curr_id, buffer);
+    auto* node = reinterpret_cast<bptree_node_base*>(buffer);
+
+    while (is_node_full(node)) {
+        if (curr_id == _root_id) {
+            grow_tree();
+            break;
+        }
+
+        path.pop_back(); 
+        uint32_t parent_id = path.back();
+
+        split_node(curr_id, parent_id);
+
+        curr_id = parent_id;
+        _pager.read_page(curr_id, buffer);
+        node = reinterpret_cast<bptree_node_base*>(buffer);
+    }
+}
+
+template <typename tkey, std::size_t t, typename Compare>
+void BP_tree<tkey, t, Compare>::grow_tree() {
+    uint32_t new_root_id = _pager.allocate_page();
+
+    alignas(4096) char buffer[PAGE_SIZE];
+    std::memset(buffer, 0, PAGE_SIZE);
+
+    auto* new_root = new (buffer) bptree_node_middle();
+
+    new_root->_pointers[0] = _root_id;
+    new_root->_count = 0;
+    _pager.write_page(new_root_id, buffer);
+    uint32_t old_root_id = _root_id;
+    _root_id = new_root_id;
+    split_node(old_root_id, new_root_id);
+}
+
+template <typename tkey, std::size_t t, typename Compare>
+Result BP_tree<tkey, t, Compare>::insert(const tkey& key, const RecordID& rid) {
+    if (contains(key)) {
+        return {false, "Error: Duplicate key", {0,0}};
+    }
+
+    if (_root_id == 0) {
+        init_first_root();
+    }
+
+    std::vector<uint32_t> path;
+    uint32_t leaf_id = find_path(key, path);
+
+    alignas(4096) char buffer[PAGE_SIZE];
+    _pager.read_page(leaf_id, buffer);
+    auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
+
+    size_t pos = binary_search_in_node(leaf, key);
+
+    if (pos < leaf->_count) {
+        size_t num_to_move = leaf->_count - pos;
+        std::memmove(&leaf->_data[pos + 1], &leaf->_data[pos], num_to_move * sizeof(tree_data_type));
+    }
+
+    leaf->_data[pos] = std::make_pair(key, rid);
+    leaf->_count++;
+
+    _pager.write_page(leaf_id, buffer);
+
+    balance_insert(leaf_id, path);
+
+    return {true, "Success", rid};
+}
+
+
 #endif
