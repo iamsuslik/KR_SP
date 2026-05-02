@@ -80,4 +80,178 @@ private:
     void write_node(uint32_t page_id, const void* buffer) { _pager.write_page(page_id, buffer); }
 };
 
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+uint32_t BP_tree<tkey, t, compare>::find_path(const tkey& key, std::vector<uint32_t>& path) 
+{
+    uint32_t curr_id = _root_id;
+    if (curr_id == 0) return 0;
+    alignas(4096) char buffer[PAGE_SIZE];
+
+    while (true) {
+        _pager.read_page(curr_id, buffer);
+        auto* base = reinterpret_cast<bptree_node_base*>(buffer);
+        if (base->_is_terminate) break;
+        path.push_back(curr_id);
+        auto* mid = reinterpret_cast<bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, key);
+        curr_id = mid->_pointers[idx];
+    }
+    return curr_id;
+}
+
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+size_t BP_tree<tkey, t, compare>::binary_search_in_node(const bptree_node_base* node, const tkey& key) const 
+{
+    size_t l = 0;
+    size_t r = node->_count; 
+
+    if (node->_is_terminate) {
+        const auto* term = static_cast<const bptree_node_term*>(node);
+        while (l < r) {
+            size_t mid = l + (r - l) / 2;
+            if (compare_keys(key, term->_data[mid].first)) {
+                r = mid;
+            } else {
+                l = mid + 1;
+            }
+        }
+    } else {
+        const auto* mid_node = static_cast<const bptree_node_middle*>(node);
+        while (l < r) {
+            size_t mid = l + (r - l) / 2;
+            if (compare_keys(key, mid_node->_keys[mid])) {
+                r = mid;
+            } else {
+                l = mid + 1;
+            }
+        }
+    }
+    return l;
+}
+
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const 
+{
+    if (_root_id == 0) {
+        return {false, "search error: b+-tree is empty", {0, 0}};
+    }
+
+    uint32_t curr_id = _root_id;
+    alignas(4096) char buffer[PAGE_SIZE];
+
+    while (true) {
+        _pager.read_page(curr_id, buffer);
+        auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
+        if (base->_is_terminate) break;
+
+        auto* mid = reinterpret_cast<const bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, key);
+        curr_id = mid->_pointers[idx];
+    }
+
+    auto* leaf = reinterpret_cast<const bptree_node_term*>(buffer);
+    size_t idx = binary_search_in_node(leaf, key);
+
+    if (idx > 0 && equal(key, leaf->_data[idx - 1].first)) {
+        out_rid = leaf->_data[idx - 1].second;
+        return {true, "key found", out_rid};
+    }
+
+    return {false, "search error: key not found", {0, 0}};
+}
+
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+bool BP_tree<tkey, t, compare>::contains(const tkey& key) const
+{
+    RecordID dummy_rid;
+    Result res = find(key, dummy_rid);
+    return res.success;
+}
+
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid) const 
+{
+    if (_root_id == 0) {
+        return {false, "lower_bound error: b+-tree is empty", {0, 0}};
+    }
+
+    uint32_t curr_id = _root_id;
+    alignas(4096) char buffer[PAGE_SIZE];
+
+    while (true) {
+        _pager.read_page(curr_id, buffer);
+        auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
+        
+        if (base->_is_terminate) break;
+
+        auto* mid = reinterpret_cast<const bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, key);
+        curr_id = mid->_pointers[idx];
+    }
+
+    auto* leaf = reinterpret_cast<const bptree_node_term*>(buffer);
+    size_t l = binary_search_in_node(leaf, key);
+
+    if (l > 0 && equal(key, leaf->_data[l-1].first)) {
+        out_rid = leaf->_data[l-1].second;
+        return {true, "found exact match", out_rid};
+    } 
+    else if (l < leaf->_count) {
+        out_rid = leaf->_data[l].second;
+        return {true, "found next greater element in same leaf", out_rid};
+    } 
+    else if (leaf->_next != 0) {
+        uint32_t next_leaf_id = leaf->_next;
+        _pager.read_page(next_leaf_id, buffer);
+        auto* next_leaf = reinterpret_cast<const bptree_node_term*>(buffer);
+        
+        if (next_leaf->_count > 0) {
+            out_rid = next_leaf->_data[0].second;
+            return {true, "found in next leaf", out_rid};
+        }
+    }
+    return {false, "lower_bound: no elements >= key found", {0, 0}};
+}
+
+template <typename tkey, std::size_t t, comparator<tkey> compare>
+Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid) const 
+{
+    if (_root_id == 0) {
+        return {false, "upper_bound error: b+-tree is empty", {0, 0}};
+    }
+
+    uint32_t curr_id = _root_id;
+    alignas(4096) char buffer[PAGE_SIZE];
+    while (true) {
+        _pager.read_page(curr_id, buffer);
+        auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
+        
+        if (base->_is_terminate) break;
+
+        auto* mid = reinterpret_cast<const bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, key);
+        curr_id = mid->_pointers[idx];
+    }
+    auto* leaf = reinterpret_cast<const bptree_node_term*>(buffer);
+    size_t l = binary_search_in_node(leaf, key);
+
+    if (l < leaf->_count && equal(key, leaf->_data[l].first)) {
+        l++; 
+    }
+    if (l < leaf->_count) {
+        out_rid = leaf->_data[l].second;
+        return {true, "found strictly greater element", out_rid};
+    } 
+    else if (leaf->_next != 0) {
+        _pager.read_page(leaf->_next, buffer);
+        auto* next_leaf = reinterpret_cast<const bptree_node_term*>(buffer);
+        if (next_leaf->_count > 0) {
+            out_rid = next_leaf->_data[0].second;
+            return {true, "found in next leaf", out_rid};
+        }
+    }
+
+    return {false, "upper_bound: no element strictly greater than key", {0, 0}};
+}
+
 #endif
