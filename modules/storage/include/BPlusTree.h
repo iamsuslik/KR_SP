@@ -16,6 +16,10 @@ private:
     static constexpr const size_t minimum_keys_in_node = t - 1;
     static constexpr const size_t maximum_keys_in_node = 2 * t - 1;
 
+    inline bool compare_keys(const tkey& lhs, const tkey& rhs) const {return compare::operator()(lhs, rhs);}
+    inline bool compare_pairs(const tree_data_type& lhs, const tree_data_type& rhs) const {return compare_keys(lhs.first, rhs.first);}
+    inline bool equal(const tkey& lhs, const tkey& rhs) const { return !compare_keys(lhs, rhs) && !compare_keys(rhs, lhs); }
+
     #pragma pack(push, 1)
 
     struct bptree_node_base
