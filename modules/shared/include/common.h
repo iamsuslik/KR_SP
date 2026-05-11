@@ -19,6 +19,8 @@ struct ColumnSchema {
     uint8_t type;
     bool is_indexed;
     bool is_not_null;
+    bool has_default;
+    char default_val[TYPE_STR_SIZE];
 };
 
 struct TableHeader {
@@ -39,6 +41,8 @@ struct ColumnDef {
     DataType type;
     bool is_indexed;
     bool is_not_null;
+    bool has_default = false;
+    std::string default_value = "";
     ColumnDef(std::string n, DataType t, bool idx = false, bool nn = false) 
         : name(n), type(t), is_indexed(idx), is_not_null(nn) {}
 };

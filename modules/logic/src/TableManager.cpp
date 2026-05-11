@@ -23,11 +23,15 @@ Result TableManager::serializeRow(const Row& input_row, char* out_slot, const Ta
         const auto& col_schema = header.columns[i];
         const Value* val = (i < input_row.size()) ? &input_row[i] : nullptr;
 
-        if ((val == nullptr || val->is_null) && col_schema.is_not_null) {
-            return {false, "Constraint Error: Column '" + std::string(col_schema.name) + "' is NOT NULL", {0,0}};
-        }
-
-        if (val != nullptr && !val->is_null) {
+        if (val == nullptr || val->is_null) {
+            if (col_schema.has_default) {
+                std::memcpy(out_slot + offset, col_schema.default_val, (col_schema.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE);
+                null_bitmap |= (1 << i);
+            } else if (col_schema.is_not_null) {
+                return {false, "Constraint Error: Column '" + std::string(col_schema.name) + "' is NOT NULL and has no DEFAULT", {0,0}};
+            }
+            offset += (col_schema.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+        } else {
             null_bitmap |= (1 << i);
 
             if (col_schema.type == 0) {
@@ -35,11 +39,10 @@ Result TableManager::serializeRow(const Row& input_row, char* out_slot, const Ta
                 offset += TYPE_INT_SIZE;
             } else {
                 std::strncpy(out_slot + offset, val->str_val.c_str(), TYPE_STR_SIZE - 1);
-                out_slot[offset + TYPE_STR_SIZE - 1] = '\0';
+
                 offset += TYPE_STR_SIZE;
             }
-        } else {
-            offset += (col_schema.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+
         }
     }
     std::memcpy(out_slot + bitmap_offset, &null_bitmap, sizeof(uint16_t));
@@ -54,27 +57,31 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
 
         header.column_count = (uint32_t)schema.columns.size();
         header.root_page_id = 0;
-        header.free_count = 0;
-
-        uint32_t calc_size = ROW_METADATA_SIZE; 
-        for (const auto& col : schema.columns) {
-            calc_size += (col.type == DataType::INT) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
-        }
-        header.row_size = calc_size;
+        header.row_size = ROW_METADATA_SIZE;
 
         for (size_t i = 0; i < schema.columns.size() && i < MAX_COLUMNS; ++i) {
             const auto& col = schema.columns[i];
             std::strncpy(header.columns[i].name, col.name.c_str(), MAX_NAME_LEN - 1);
-            header.columns[i].name[MAX_NAME_LEN - 1] = '\0';
+
             header.columns[i].type = (col.type == DataType::INT) ? 0 : 1;
             header.columns[i].is_indexed = col.is_indexed;
             header.columns[i].is_not_null = col.is_not_null;
-        }
 
+            header.columns[i].has_default = col.has_default;
+            if (col.has_default) {
+                if (col.type == DataType::INT) {
+                    int d_val = std::stoi(col.default_value);
+                    std::memcpy(header.columns[i].default_val, &d_val, sizeof(int));
+                } else {
+                    std::string d_val = col.default_value;
+                    if (d_val.front() == '"') d_val = d_val.substr(1, d_val.size() - 2);
+                    std::strncpy(header.columns[i].default_val, d_val.c_str(), TYPE_STR_SIZE - 1);
+                }
+            }
+            header.row_size += (col.type == DataType::INT) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+        }
         return pager.write_page(0, &header);
-    } catch (const std::exception& e) {
-        return {false, std::string("Creation failed: ") + e.what(), {0, 0}};
-    }
+    } catch (...) { return {false, "Table creation failed", {0,0}}; }
 }
 
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {

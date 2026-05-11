@@ -128,13 +128,18 @@ void SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hierar
         std::string colName = tokens[i++];
         std::string colTypeStr = toUpper(tokens[i++]);
         DataType type = (colTypeStr == "INT") ? DataType::INT : DataType::STR;
-        bool isIdx = false, isNN = false;
+        
+        ColumnDef cd(colName, type);
         while (i < tokens.size() && tokens[i] != "," && tokens[i] != ")") {
             std::string flag = toUpper(tokens[i++]);
-            if (flag == "INDEXED") isIdx = true;
-            else if (flag == "NOT_NULL") isNN = true;
+            if (flag == "INDEXED") cd.is_indexed = true;
+            else if (flag == "NOT_NULL") cd.is_not_null = true;
+            else if (flag == "DEFAULT") {
+                cd.has_default = true;
+                cd.default_value = tokens[i++];
+            }
         }
-        cols.push_back(ColumnDef(colName, type, isIdx, isNN));
+        cols.push_back(cd);
         if (i < tokens.size() && tokens[i] == ",") i++;
     }
     std::cout << TableManager::createTable(res.path, TableSchema(tableName, cols)).message << "\n";
