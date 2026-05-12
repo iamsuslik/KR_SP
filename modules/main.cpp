@@ -6,6 +6,8 @@
 #include "modules/core/include/HierarchyManager.h"
 #include "modules/logic/include/TableManager.h"
 #include "modules/api/include/SQLParser.h"
+#include <chrono>
+#include "modules/logger/include/Logger.h"
 
 
 void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser, bool isInteractive) {
@@ -27,7 +29,11 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
         size_t pos;
         while ((pos = buffer.find(';')) != std::string::npos) {
             std::string query = buffer.substr(0, pos);
+            auto start = std::chrono::high_resolution_clock::now();
             parser.process(query, hm);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            Logger::log(query, "PROCESSED", duration);
             buffer.erase(0, pos + 1);
         }
     }
