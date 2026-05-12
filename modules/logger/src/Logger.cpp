@@ -10,7 +10,7 @@ void Logger::log(const std::string& query, const std::string& status, long long 
     auto tm = *std::localtime(&now);
 
     logFile << "[" << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "] "
-            << "[ClientID: 1] "
+            << "[ClientID: 1] "  
             << "[HandlerID: 1] "
             << "[Query: " << query << "] "
             << "[Status: " << status << "] "
