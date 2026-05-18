@@ -20,6 +20,7 @@ set(SOURCES
     core/src/Pager.cpp
     logic/src/TableManager.cpp
     storage/src/BPlusTree.cpp
+    logger/src/Logger.cpp
 )
 
 add_executable(my_db ${SOURCES})
