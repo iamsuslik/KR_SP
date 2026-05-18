@@ -126,36 +126,70 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     } catch (const std::exception& e) { return {false, e.what(), {0, 0}}; }
 }
 
-bool TableManager::matches(const Row& row, const TableHeader& header, const Condition& cond) {
-    if (!cond.active) return true;
+bool TableManager::matches(const Row& row, const TableHeader& header, const ExpressionNode* node) {
+    if (!node) return true;
+
+    if (node->is_op) {
+        bool left = matches(row, header, node->left.get());
+        if (node->op == "OR" && left) return true;
+        if (node->op == "AND" && !left) return false;
+
+        bool right = matches(row, header, node->right.get());
+        if (node->op == "AND") return left && right;
+        if (node->op == "OR") return left || right;
+    }
+
+    Condition cond;
+    cond.active = true;
+    cond.column = node->column;
+    cond.op = node->op;
+    cond.val1 = node->val1;
+
+    return evaluateLeaf(row, header, node);
+}
+
+bool TableManager::evaluateLeaf(const Row& row, const TableHeader& header, const ExpressionNode* cond) {
+    if (!cond) return false;
+
     int colIdx = -1;
     for (uint32_t i = 0; i < header.column_count; ++i) {
-        if (std::string(header.columns[i].name) == cond.column) { colIdx = i; break; }
+        if (std::string(header.columns[i].name) == cond->column) { 
+            colIdx = i; 
+            break; 
+        }
     }
+    
     if (colIdx == -1) return false;
 
     const Value& val = row[colIdx];
     try {
         if (val.type == DataType::INT) {
-            int v = val.int_val; int t1 = std::stoi(cond.val1);
-            if (cond.op == "==") return v == t1;
-            if (cond.op == "!=") return v != t1;
-            if (cond.op == ">")  return v > t1;
-            if (cond.op == "<")  return v < t1;
-            if (cond.op == ">=") return v >= t1;
-            if (cond.op == "<=") return v <= t1;
-            if (cond.op == "BETWEEN") return v >= t1 && v < std::stoi(cond.val2);
+            int v = val.int_val;
+            int t1 = std::stoi(cond->val1);
+
+            if (cond->op == "==") return v == t1;
+            if (cond->op == "!=") return v != t1;
+            if (cond->op == ">")  return v > t1;
+            if (cond->op == "<")  return v < t1;
+            if (cond->op == ">=") return v >= t1;
+            if (cond->op == "<=") return v <= t1;
+            if (cond->op == "BETWEEN") {
+                int t2 = std::stoi(cond->val2);
+                return v >= t1 && v <= t2;
+            }
         } else {
-            if (cond.op == "==") return val.str_val == cond.val1;
-            if (cond.op == "!=") return val.str_val != cond.val1;
-            if (cond.op == "LIKE") return std::regex_match(val.str_val, std::regex(cond.val1));
+            if (cond->op == "==") return val.str_val == cond->val1;
+            if (cond->op == "!=") return val.str_val != cond->val1;
+            if (cond->op == "LIKE") return std::regex_match(val.str_val, std::regex(cond->val1));
         }
-    } catch (...) { return false; }
+    } catch (...) { 
+        return false; 
+    }
     return false;
 }
 
 Result TableManager::executeSelect(const std::string& full_path, 
-                                 const Condition& cond, 
+                                 const ExpressionNode* cond, 
                                  const std::vector<std::string>& selectedCols, 
                                  const std::map<std::string, std::string>& aliases) {
     try {
@@ -183,9 +217,9 @@ Result TableManager::executeSelect(const std::string& full_path,
         }
 
         int indexedColIdx = -1;
-        if (cond.active && cond.op == "==") {
+        if (cond && !cond->is_op && cond->op == "==") {
             for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == cond.column && header.columns[c].is_indexed) {
+                if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
                     indexedColIdx = c;
                     break;
                 }
@@ -196,7 +230,7 @@ Result TableManager::executeSelect(const std::string& full_path,
             BP_tree<int> index(pager, header.root_page_id);
             RecordID rid;
 
-            if (index.find(std::stoi(cond.val1), rid).success) {
+            if (index.find(std::stoi(cond->val1), rid).success) {
                 char buf[PAGE_SIZE];
                 pager.read_page(rid.page_id, buf);
                 char* slot_ptr = buf + (rid.slot_id * header.row_size);
@@ -277,7 +311,7 @@ Result TableManager::executeSelect(const std::string& full_path,
     }
 }
 
-Result TableManager::executeUpdate(const std::string& full_path, const Condition& cond, const std::string& targetCol, const std::string& newVal) {
+Result TableManager::executeUpdate(const std::string& full_path, const ExpressionNode* cond, const std::string& targetCol, const std::string& newVal) {
     try {
         Pager pager(full_path);
         TableHeader header;
@@ -324,7 +358,7 @@ Result TableManager::executeUpdate(const std::string& full_path, const Condition
     } catch (const std::exception& e) { return {false, std::string("Update Error: ") + e.what(), {0,0}}; }
 }
 
-Result TableManager::executeDelete(const std::string& full_path, const Condition& cond) {
+Result TableManager::executeDelete(const std::string& full_path, const ExpressionNode* cond) {
     try {
         Pager pager(full_path);
         TableHeader header;

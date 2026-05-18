@@ -1,0 +1,3 @@
+C:/Users/daria/Desktop/уч и зад/4 сем/KR_SP/build/CMakeFiles/my_db.dir
+C:/Users/daria/Desktop/уч и зад/4 сем/KR_SP/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/daria/Desktop/уч и зад/4 сем/KR_SP/build/CMakeFiles/ZERO_CHECK.dir

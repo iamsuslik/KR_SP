@@ -1,6 +1,13 @@
 #include "../include/SQLParser.h"
 #include <map>
 #include <stdexcept>
+#include <stack>
+#include <memory>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <iostream>
+#include <regex>
 
 std::string SQLParser::toUpper(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), ::toupper);
@@ -11,8 +18,8 @@ bool SQLParser::isValidCase(const std::string& token) {
     if (token.empty() || token[0] == '"') return true;
     bool hasUpper = false, hasLower = false;
     for (char c : token) {
-        if (std::isupper(c)) hasUpper = true;
-        if (std::islower(c)) hasLower = true;
+        if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
+        if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
     }
     return !(hasUpper && hasLower);
 }
@@ -20,6 +27,65 @@ bool SQLParser::isValidCase(const std::string& token) {
 bool SQLParser::isValidIdentifier(const std::string& name) {
     std::regex pattern("^[a-zA-Z_][a-zA-Z0-9_]*$");
     return std::regex_match(name, pattern);
+}
+
+int SQLParser::getPrecedence(const std::string& op) {
+    if (op == "OR") return 1;
+    if (op == "AND") return 2;
+    if (op == "=" || op == ">" || op == "<" || op == "!=" || op == ">=" || op == "<=" || op == "LIKE") return 3;
+    return 0;
+}
+
+std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(const std::vector<std::string>& tokens) {
+    if (tokens.empty()) return nullptr;
+
+    std::stack<std::shared_ptr<ExpressionNode>> values;
+    std::stack<std::string> ops;
+
+    auto processOp = [&]() {
+        if (ops.empty() || values.size() < 2) return;
+        std::string op = ops.top(); ops.pop();
+        auto right = values.top(); values.pop();
+        auto left = values.top(); values.pop();
+
+        auto node = std::make_shared<ExpressionNode>();
+        if (op == "AND" || op == "OR") {
+            node->is_op = true;
+            node->op = op;
+            node->left = left;
+            node->right = right;
+        } else {
+            node->is_op = false;
+            node->op = op;
+            node->column = left->column; 
+            node->val1 = right->column;
+        }
+        values.push(node);
+    };
+
+    for (const auto& token : tokens) {
+        std::string upToken = toUpper(token);
+
+        if (upToken == "(") {
+            ops.push(upToken);
+        } else if (upToken == ")") {
+            while (!ops.empty() && ops.top() != "(") processOp();
+            if (!ops.empty()) ops.pop();
+        } else if (getPrecedence(upToken) > 0) {
+            while (!ops.empty() && ops.top() != "(" && getPrecedence(ops.top()) >= getPrecedence(upToken)) {
+                processOp();
+            }
+            ops.push(upToken);
+        } else {
+            auto leaf = std::make_shared<ExpressionNode>();
+            leaf->is_op = false;
+            leaf->column = (token.front() == '"') ? token.substr(1, token.size() - 2) : token;
+            values.push(leaf);
+        }
+    }
+
+    while (!ops.empty()) processOp();
+    return values.empty() ? nullptr : values.top();
 }
 
 std::vector<std::string> SQLParser::tokenize(const std::string& query) {
@@ -35,9 +101,9 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) {
             if (!inQuotes) { tokens.push_back(current); current = ""; }
         } else if (inQuotes) {
             current += c;
-        } else if (isspace(c) || c == ',' || c == '(' || c == ')' || c == ';') {
+        } else if (isspace(static_cast<unsigned char>(c)) || c == ',' || c == '(' || c == ')' || c == ';') {
             if (!current.empty()) tokens.push_back(current);
-            if (!isspace(c) && c != ';') tokens.push_back(std::string(1, c));
+            if (!isspace(static_cast<unsigned char>(c)) && c != ';') tokens.push_back(std::string(1, c));
             current = "";
         } else if (c == '=' || c == '<' || c == '>' || c == '!') {
             if (!current.empty()) tokens.push_back(current);
@@ -53,30 +119,14 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) {
     return tokens;
 }
 
-Condition SQLParser::parseWhere(const std::vector<std::string>& tokens) {
-    Condition c;
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (toUpper(tokens[i]) == "WHERE") {
-            if (i + 3 >= tokens.size()) break;
-            c.active = true;
-            c.column = tokens[i+1];
-            c.op = tokens[i+2];
-            c.val1 = tokens[i+3];
-            if (toUpper(c.op) == "BETWEEN" && i + 5 < tokens.size()) {
-                c.val2 = tokens[i+5];
-            }
-            break;
-        }
-    }
-    return c;
-}
+
 
 void SQLParser::process(std::string query, HierarchyManager& hm) {
     auto tokens = tokenize(query);
     if (tokens.empty()) return;
 
     for (const auto& t : tokens) {
-        if (!isValidCase(t)) {
+        if (t.front() != '"' && !isValidCase(t)) {
             std::cout << "[Error] Mixed case in word '" << t << "' is forbidden.\n";
             return;
         }
@@ -103,6 +153,15 @@ void SQLParser::process(std::string query, HierarchyManager& hm) {
         }
     }
     else std::cout << "[Error] Unknown command.\n";
+}
+
+std::vector<std::string> getWhereTokens(const std::vector<std::string>& tokens) {
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (SQLParser::toUpper(tokens[i]) == "WHERE") {
+            return std::vector<std::string>(tokens.begin() + i + 1, tokens.end());
+        }
+    }
+    return {};
 }
 
 void SQLParser::handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm) {
@@ -173,10 +232,7 @@ void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyMa
         if (tokens[vIdx] != ",") values.push_back(tokens[vIdx]);
     }
 
-    if (targetColNames.empty() && values.size() != header.column_count) {
-        std::cout << "[Error] Positional insert: value count mismatch (" << values.size() << "/" << header.column_count << ")\n";
-        return;
-    }
+
 
     Row finalRow(header.column_count, Value());
     try {
@@ -222,7 +278,8 @@ void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyMa
 
     auto res = hm.resolveTablePath(tableName);
     if (res.success && res.message == "EXIST") {
-        TableManager::executeSelect(res.path, parseWhere(tokens), selectedCols, aliases);
+        auto whereTokens = getWhereTokens(tokens);
+        TableManager::executeSelect(res.path, buildExpressionTree(whereTokens).get(), selectedCols, aliases);
     } else std::cout << "[Error] Table not found.\n";
 }
 
@@ -230,7 +287,8 @@ void SQLParser::handleDelete(const std::vector<std::string>& tokens, HierarchyMa
     if (tokens.size() < 3) return;
     auto res = hm.resolveTablePath(tokens[2]);
     if (res.success && res.message == "EXIST") {
-        std::cout << TableManager::executeDelete(res.path, parseWhere(tokens)).message << "\n";
+        auto whereTokens = getWhereTokens(tokens);
+        std::cout << TableManager::executeDelete(res.path, buildExpressionTree(whereTokens).get()).message << "\n";
     } else std::cout << "[Error] Table not found.\n";
 }
 
@@ -238,6 +296,7 @@ void SQLParser::handleUpdate(const std::vector<std::string>& tokens, HierarchyMa
     if (tokens.size() < 6) return;
     auto res = hm.resolveTablePath(tokens[1]);
     if (res.success && res.message == "EXIST") {
-        std::cout << TableManager::executeUpdate(res.path, parseWhere(tokens), tokens[3], tokens[5]).message << "\n";
+        auto whereTokens = getWhereTokens(tokens);
+        std::cout << TableManager::executeUpdate(res.path, buildExpressionTree(whereTokens).get(), tokens[3], tokens[5]).message << "\n";
     } else std::cout << "[Error] Table not found.\n";
 }

@@ -13,22 +13,24 @@ public:
     static Result insertRow(const std::string& full_path, const Row& row);
 
     static Result executeSelect(const std::string& full_path, 
-                           const Condition& cond, 
+                           const ExpressionNode* cond, 
                            const std::vector<std::string>& selectedCols = {},
                            const std::map<std::string, std::string>& aliases = {});
     
     static Result executeUpdate(const std::string& full_path, 
-                               const Condition& cond, 
+                               const ExpressionNode* cond, 
                                const std::string& targetCol, 
                                const std::string& newVal);
 
-    static Result executeDelete(const std::string& full_path, const Condition& cond);
+    static Result executeDelete(const std::string& full_path, const ExpressionNode* cond);
 
     static Result dropTable(const std::string& full_path);
+    static bool matches(const Row& row, const TableHeader& header, const ExpressionNode* node);
+    static bool evaluateLeaf(const Row& row, const TableHeader& header, const ExpressionNode* cond);
 
 private:
     static Result serializeRow(const Row& input_row, char* out_slot, const TableHeader& header);
-    static bool matches(const Row& row, const TableHeader& header, const Condition& cond);
+
 };
 
 #endif // TABLE_MANAGER_H
