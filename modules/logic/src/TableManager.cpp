@@ -159,31 +159,65 @@ void TableManager::updateIndices(Pager& pager, TableHeader& header, const Row& r
     }
 }
 
-bool TableManager::matches(const Row& row, const TableHeader& header, const Condition& cond) {
-    if (!cond.active) return true;
+bool TableManager::matches(const Row& row, const TableHeader& header, const ExpressionNode* node) {
+    if (!node) return true;
+
+    if (node->is_op) {
+        bool left = matches(row, header, node->left.get());
+        if (node->op == "OR" && left) return true;
+        if (node->op == "AND" && !left) return false;
+
+        bool right = matches(row, header, node->right.get());
+        if (node->op == "AND") return left && right;
+        if (node->op == "OR") return left || right;
+    }
+
+    Condition cond;
+    cond.active = true;
+    cond.column = node->column;
+    cond.op = node->op;
+    cond.val1 = node->val1;
+
+    return evaluateLeaf(row, header, node);
+}
+
+bool TableManager::evaluateLeaf(const Row& row, const TableHeader& header, const ExpressionNode* cond) {
+    if (!cond) return false;
+
     int colIdx = -1;
     for (uint32_t i = 0; i < header.column_count; ++i) {
-        if (std::string(header.columns[i].name) == cond.column) { colIdx = i; break; }
+        if (std::string(header.columns[i].name) == cond->column) { 
+            colIdx = i; 
+            break; 
+        }
     }
+    
     if (colIdx == -1) return false;
 
     const Value& val = row[colIdx];
     try {
         if (val.type == DataType::INT) {
-            int v = val.int_val; int t1 = std::stoi(cond.val1);
-            if (cond.op == "==") return v == t1;
-            if (cond.op == "!=") return v != t1;
-            if (cond.op == ">")  return v > t1;
-            if (cond.op == "<")  return v < t1;
-            if (cond.op == ">=") return v >= t1;
-            if (cond.op == "<=") return v <= t1;
-            if (cond.op == "BETWEEN") return v >= t1 && v < std::stoi(cond.val2);
+            int v = val.int_val;
+            int t1 = std::stoi(cond->val1);
+
+            if (cond->op == "==") return v == t1;
+            if (cond->op == "!=") return v != t1;
+            if (cond->op == ">")  return v > t1;
+            if (cond->op == "<")  return v < t1;
+            if (cond->op == ">=") return v >= t1;
+            if (cond->op == "<=") return v <= t1;
+            if (cond->op == "BETWEEN") {
+                int t2 = std::stoi(cond->val2);
+                return v >= t1 && v <= t2;
+            }
         } else {
-            if (cond.op == "==") return val.str_val == cond.val1;
-            if (cond.op == "!=") return val.str_val != cond.val1;
-            if (cond.op == "LIKE") return std::regex_match(val.str_val, std::regex(cond.val1));
+            if (cond->op == "==") return val.str_val == cond->val1;
+            if (cond->op == "!=") return val.str_val != cond->val1;
+            if (cond->op == "LIKE") return std::regex_match(val.str_val, std::regex(cond->val1));
         }
-    } catch (...) { return false; }
+    } catch (...) { 
+        return false; 
+    }
     return false;
 }
 
@@ -264,10 +298,9 @@ void TableManager::applyAggregates(const Row& row, const TableHeader& header,
 }
 
 Result TableManager::executeSelect(const std::string& full_path, 
-                                 const Condition& cond, 
+                                 const ExpressionNode* cond, 
                                  const std::vector<std::string>& selectedCols, 
-                                 const std::map<std::string, std::string>& aliases,
-                                 const std::vector<AggregateRequest>& aggs) {
+                                 const std::map<std::string, std::string>& aliases) {
     try {
         Pager pager(full_path);
         TableHeader header;
@@ -421,7 +454,7 @@ void TableManager::updateFieldAndIndex(Row& row, uint32_t colIdx, const std::str
     }
 }
 
-Result TableManager::executeDelete(const std::string& full_path, const Condition& cond) {
+Result TableManager::executeDelete(const std::string& full_path, const ExpressionNode* cond) {
     try {
         Pager pager(full_path);
         TableHeader header;

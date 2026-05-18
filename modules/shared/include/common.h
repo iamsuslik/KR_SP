@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 
 const int PAGE_SIZE = 4096;
 const int MAX_COLUMNS = 10;
@@ -72,6 +73,16 @@ struct Condition {
     std::string op;
     std::string val1;
     std::string val2;
+};
+
+struct ExpressionNode {
+    bool is_op = false;
+    std::string op;
+    std::string column;
+    std::string val1;
+    std::string val2;
+    std::shared_ptr<ExpressionNode> left;
+    std::shared_ptr<ExpressionNode> right;
 };
 
 struct RecordID { uint32_t page_id; uint32_t slot_id; };

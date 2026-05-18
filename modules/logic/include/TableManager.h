@@ -13,25 +13,27 @@ public:
     static Result insertRow(const std::string& full_path, const Row& row);
 
     static Result executeSelect(const std::string& full_path, 
-                           const Condition& cond, 
+                           const ExpressionNode* cond, 
                            const std::vector<std::string>& selectedCols = {},
                            const std::map<std::string, std::string>& aliases = {},
                            const std::vector<AggregateRequest>& aggs = {});
     
     static Result executeUpdate(const std::string& full_path, 
-                               const Condition& cond, 
+                               const ExpressionNode* cond, 
                                const std::string& targetCol, 
                                const std::string& newVal);
 
-    static Result executeDelete(const std::string& full_path, const Condition& cond);
+    static Result executeDelete(const std::string& full_path, const ExpressionNode* cond);
 
     static Result dropTable(const std::string& full_path);
+    static bool matches(const Row& row, const TableHeader& header, const ExpressionNode* node);
+    static bool evaluateLeaf(const Row& row, const TableHeader& header, const ExpressionNode* cond);
 
 private:
     static void initColumnSchema(ColumnSchema& dest, const ColumnDef& src);
     static void writeField(char* out_slot, int& offset, const Value* val, const ColumnSchema& col);
     static Result serializeRow(const Row& input_row, char* out_slot, const TableHeader& header);
-    static bool matches(const Row& row, const TableHeader& header, const Condition& cond);
+
     static Row extractRow(char* slot_ptr, const TableHeader& header);
     static void printRowAsJson(const Row& row, const TableHeader& header, 
                                const std::vector<uint32_t>& colsToPrint, 
@@ -43,7 +45,7 @@ private:
     
     static std::vector<uint32_t> getProjection(const TableHeader& header, const std::vector<std::string>& selectedCols);
     
-    static void processRow(const Row& row, const TableHeader& header, const Condition& cond, 
+    static void processRow(const Row& row, const TableHeader& header, const ExpressionNode* cond, 
                            const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint, 
                            const std::map<std::string, std::string>& aliases, 
                            long long& t_sum, int& t_count, bool& first, bool isAgg);
@@ -54,6 +56,7 @@ private:
     static bool isPageEmpty(char* page_buffer, uint32_t row_size);
     static void updateFieldAndIndex(Row& row, uint32_t colIdx, const std::string& newVal, 
                                    TableHeader& header, Pager& pager, RecordID rid, bool& header_changed);
+
 };
 
 #endif // TABLE_MANAGER_H

@@ -6,6 +6,7 @@
 #include <regex>
 #include <iostream>
 #include <algorithm>
+#include <memory>
 
 #include "../../shared/include/common.h"
 #include "../../core/include/HierarchyManager.h"
@@ -15,13 +16,15 @@ class SQLParser {
 public:
     void process(std::string query, HierarchyManager& hm);
 
+    static std::string toUpper(std::string s);
+
 private:
     std::vector<std::string> tokenize(const std::string& query);
     bool isValidCase(const std::string& token);
     bool isValidIdentifier(const std::string& name);
-    std::string toUpper(std::string s);
-    
-    Condition parseWhere(const std::vector<std::string>& tokens);
+
+    std::shared_ptr<ExpressionNode> buildExpressionTree(const std::vector<std::string>& tokens);
+    int getPrecedence(const std::string& op);
 
     void handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm);
     void handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm);

@@ -2,11 +2,12 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <chrono>
+
 #include "modules/shared/include/common.h"
 #include "modules/core/include/HierarchyManager.h"
 #include "modules/logic/include/TableManager.h"
 #include "modules/api/include/SQLParser.h"
-#include <chrono>
 #include "modules/logger/include/Logger.h"
 
 
@@ -29,11 +30,16 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
         size_t pos;
         while ((pos = buffer.find(';')) != std::string::npos) {
             std::string query = buffer.substr(0, pos);
+
             auto start = std::chrono::high_resolution_clock::now();
+
             parser.process(query, hm);
+
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
             Logger::log(query, "PROCESSED", duration);
+
             buffer.erase(0, pos + 1);
         }
     }
@@ -43,17 +49,6 @@ int main(int argc, char* argv[]) {
     HierarchyManager hm;
     SQLParser parser;
 
-    hm.createDatabase("university_db");
-    hm.useDatabase("university_db");
-    
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true, true),
-        ColumnDef("name", DataType::STR, false, true),
-        ColumnDef("age", DataType::INT, false, false)
-    };
-    TableSchema studentsTable("students", cols);
-    Result pathRes = hm.resolveTablePath(studentsTable.table_name);
-    TableManager::createTable(pathRes.path, studentsTable);
 
     if (argc == 1) {
         runQueryEngine(std::cin, hm, parser, true);
@@ -69,6 +64,7 @@ int main(int argc, char* argv[]) {
     } 
     else {
         std::cerr << "Usage: " << argv[0] << " [script.txt]\n";
+        return 1;
     }
     
     return 0;
