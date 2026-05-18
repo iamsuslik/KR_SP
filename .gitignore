@@ -40,13 +40,14 @@
 # debug information files
 *.dwo
 
+# Project specific folders
 data/
+build/
+logs/
 
+# Executable names
 prog
+my_db
 my_db_app
 
-.vscode/
-.idea/
-cmake-build-debug/
-bin/
-obj/
+# IDE folders

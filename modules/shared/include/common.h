@@ -83,4 +83,11 @@ struct Result {
     std::string path = "";
 };
 
+enum class AggregateType { NONE, COUNT, SUM, AVG };
+
+struct AggregateRequest {
+    AggregateType type;
+    std::string column;
+};
+
 #endif

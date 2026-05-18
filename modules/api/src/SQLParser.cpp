@@ -202,28 +202,47 @@ void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyMa
 void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     std::string tableName;
     std::vector<std::string> selectedCols;
+    std::vector<AggregateRequest> aggs;
     std::map<std::string, std::string> aliases;
     size_t fromIdx = 0;
-
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (toUpper(tokens[i]) == "FROM") { fromIdx = i; tableName = tokens[i+1]; break; }
     }
-
     if (tokens[1] != "*") {
         for (size_t i = 1; i < fromIdx; ++i) {
+            std::string token = toUpper(tokens[i]);
+            if (token == "SUM" || token == "COUNT" || token == "AVG") {
+                AggregateType type = AggregateType::NONE;
+                if (token == "SUM") type = AggregateType::SUM;
+                else if (token == "COUNT") type = AggregateType::COUNT;
+                else if (token == "AVG") type = AggregateType::AVG;
+                if (i + 3 < fromIdx && tokens[i+1] == "(" && tokens[i+3] == ")") {
+                    aggs.push_back({type, tokens[i+2]});
+                    i += 3;
+                    continue;
+                }
+            }
+
             if (tokens[i] == ",") continue;
             if (toUpper(tokens[i]) == "AS") {
                 std::string alias = tokens[i+1];
                 if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
-                aliases[tokens[i-1]] = alias; i++;
-            } else selectedCols.push_back(tokens[i]);
+                if (!selectedCols.empty()) {
+                    aliases[selectedCols.back()] = alias;
+                }
+                i++;
+            } else {
+                selectedCols.push_back(tokens[i]);
+            }
         }
     }
 
     auto res = hm.resolveTablePath(tableName);
     if (res.success && res.message == "EXIST") {
-        TableManager::executeSelect(res.path, parseWhere(tokens), selectedCols, aliases);
-    } else std::cout << "[Error] Table not found.\n";
+        TableManager::executeSelect(res.path, parseWhere(tokens), selectedCols, aliases, aggs);
+    } else {
+        std::cout << "[Error] Table not found.\n";
+    }
 }
 
 void SQLParser::handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm) {

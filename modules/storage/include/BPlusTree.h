@@ -472,6 +472,54 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
+Result BP_tree<tkey, t, compare>::erase(const tkey& key_del) 
+{
+    if (_root_id == 0) return {false, "Tree empty", {0,0}};
+
+    RecordID next_rid;
+    tkey next_key;
+    bool has_next = false;
+    Result next_res = upper_bound(key_del, next_rid);
+    if (next_res.success) {
+        alignas(4096) char tmp_buf[PAGE_SIZE];
+        _pager.read_page(next_rid.page_id, tmp_buf);
+        auto* next_leaf = reinterpret_cast<bptree_node_term*>(tmp_buf);
+        next_key = next_leaf->_data[next_rid.slot_id].first;
+        has_next = true;
+    }
+
+    std::vector<uint32_t> path;
+    uint32_t leaf_id = find_path(key_del, path);
+
+    alignas(4096) char buffer[PAGE_SIZE];
+    _pager.read_page(leaf_id, buffer);
+    auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
+    size_t actual_idx = binary_search_in_node(leaf, key_del);
+
+    if (actual_idx == 0 || !equal(leaf->_data[actual_idx - 1].first, key_del)) {
+        return {false, "Key not found", {0,0}};
+    }
+    size_t del_pos = actual_idx - 1;
+    size_t num_to_move = leaf->_count - actual_idx;
+    if (num_to_move > 0) {
+        std::memmove(&leaf->_data[del_pos], &leaf->_data[del_pos + 1], num_to_move * sizeof(tree_data_type));
+    }
+    leaf->_count--;
+    _pager.write_page(leaf_id, buffer);
+    if (is_node_underfull(leaf) && leaf_id != _root_id) {
+        balance_delete(leaf_id, path);
+    }
+    shrink_root();
+    if (has_next) {
+        RecordID out_rid;
+        return find(next_key, out_rid);
+    }
+    
+    return {true, "Deleted, no next element", {0,0}};
+}
+
+template <typename tkey, std::size_t t, typename compare>
+requires comparator<compare, tkey>
 bool BP_tree<tkey, t, compare>::is_node_underfull(const bptree_node_base* node) const {
     if (node == nullptr) return false;
     return node->_count < minimum_keys_in_node;
