@@ -296,7 +296,7 @@ void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyMa
     auto res = hm.resolveTablePath(tableName);
     if (res.success && res.message == "EXIST") {
         auto whereTokens = getWhereTokens(tokens);
-        TableManager::executeSelect(res.path, buildExpressionTree(whereTokens).get(), selectedCols, aliases);
+        TableManager::executeSelect(res.path, buildExpressionTree(whereTokens).get(), selectedCols, aliases, aggs);
     } else std::cout << "[Error] Table not found.\n";
 
 }

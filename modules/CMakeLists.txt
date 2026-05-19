@@ -21,6 +21,7 @@ set(SOURCES
     logic/src/TableManager.cpp
     storage/src/BPlusTree.cpp
     logger/src/Logger.cpp
+    logic/src/RecordManager.cpp
 )
 
 add_executable(my_db ${SOURCES})

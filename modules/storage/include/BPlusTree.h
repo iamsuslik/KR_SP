@@ -170,11 +170,7 @@ Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const
     auto* leaf = reinterpret_cast<const bptree_node_term*>(buffer);
     size_t idx = binary_search_in_node(leaf, key);
 
-    //if (idx > 0 && equal(key, leaf->_data[idx - 1].first)) {
-    //    out_rid = leaf->_data[idx - 1].second;
-    //    return {true, "key found", out_rid};
-    //}
-    if (idx < leaf->_count && equal(key, leaf->_data[idx].first)) {
+    if (idx > 0 && equal(key, leaf->_data[idx - 1].first)) {
         out_rid = leaf->_data[idx].second;
         return {true, "key found", out_rid};
     }
