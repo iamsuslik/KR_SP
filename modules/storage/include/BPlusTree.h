@@ -10,20 +10,52 @@
 #include <algorithm>
 #include <cstring>
 
-template <typename tkey, std::size_t t = 160, typename compare = std::less<tkey>>
+template <typename tkey, std::size_t t = get_optimal_t<tkey>(), typename compare = std::less<tkey>>
     requires comparator<compare, tkey>
 class BP_tree final : private compare 
 {
 public:
+    template<typename Func>
+        void for_each(Func action) {
+            if (_root_id == 0) return;
+
+            uint32_t curr_id = _root_id;
+            alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+
+        // 1. Спускаемся к самому левому листу дерева
+            while (true) {
+                _pager.read_page(curr_id, buffer);
+                auto* base = reinterpret_cast<bptree_node_base*>(buffer);
+                if (base->_is_terminate) break;
+            
+            // Всегда идем по самому первому указателю
+                auto* mid = reinterpret_cast<bptree_node_middle*>(buffer);
+                curr_id = mid->_pointers[0];
+            }
+
+        // 2. Идем по цепочке листьев ("паровозиком") через _next
+            while (curr_id != 0) {
+                _pager.read_page(curr_id, buffer);
+                auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
+            
+                for (uint32_t i = 0; i < leaf->_count; ++i) {
+                    action(leaf->_data[i].second); // Передаем RecordID в лямбду
+                }
+                curr_id = leaf->_next; // Прыгаем на следующую страницу
+            }
+        }
+
     using tree_data_type = std::pair<tkey, RecordID>;
 
 private:
-    static constexpr const size_t minimum_keys_in_node = t - 1;
-    static constexpr const size_t maximum_keys_in_node = 2 * t - 1;
 
     inline bool compare_keys(const tkey& lhs, const tkey& rhs) const { return compare::operator()(lhs, rhs); }
     inline bool equal(const tkey& lhs, const tkey& rhs) const { return !compare_keys(lhs, rhs) && !compare_keys(rhs, lhs); }
 
+
+    static constexpr const size_t minimum_keys_in_node = t - 1;
+    static constexpr const size_t maximum_keys_in_node = 2 * t - 1;
+    
     #pragma pack(push, 1)
 
     struct bptree_node_base
@@ -101,7 +133,7 @@ uint32_t BP_tree<tkey, t, compare>::find_path(const tkey& key, std::vector<uint3
 {
     uint32_t curr_id = _root_id;
     if (curr_id == 0) return 0;
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
 
     while (true) {
         _pager.read_page(curr_id, buffer);
@@ -155,7 +187,7 @@ Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const
     }
 
     uint32_t curr_id = _root_id;
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
 
     while (true) {
         _pager.read_page(curr_id, buffer);
@@ -171,8 +203,8 @@ Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const
     size_t idx = binary_search_in_node(leaf, key);
 
     if (idx > 0 && equal(key, leaf->_data[idx - 1].first)) {
-        out_rid = leaf->_data[idx].second;
-        return {true, "key found", out_rid};
+        out_rid = leaf->_data[idx - 1].second;
+        return {true, "OK", out_rid};
     }
 
     return {false, "search error: key not found", {0, 0}};

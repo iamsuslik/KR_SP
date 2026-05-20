@@ -35,10 +35,18 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         pager.read_page(0, &header);
 
         for (uint32_t i = 0; i < header.column_count; ++i) {
-            if (header.columns[i].is_indexed && header.root_page_id != 0) {
-                BP_tree<int> index(pager, header.root_page_id);
-                if (index.contains(row[i].int_val)) {
-                    return {false, "Constraint Error: Duplicate value in indexed column '" + std::string(header.columns[i].name) + "'", {0,0}};
+            if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
+                if (header.columns[i].type == 0) { // INT
+                    BP_tree<int> index(pager, header.root_page_ids[i]);
+                    if (index.contains(row[i].int_val)) 
+                        return {false, "Constraint Error: Duplicate value in column '" + std::string(header.columns[i].name) + "'", {0,0}};
+                } else { // STR
+                    BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
+                    IndexKeyStr key;
+                    std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
+                    key.data[TYPE_STR_SIZE - 1] = '\0';
+                    if (index.contains(key)) 
+                        return {false, "Constraint Error: Duplicate value in column '" + std::string(header.columns[i].name) + "'", {0,0}};
                 }
             }
         }
@@ -53,16 +61,13 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         if (!res.success) return res;
 
         pager.write_page(rid.page_id, page_buffer);
-        if (header.free_count != initial_free_count) {
-            pager.write_page(0, &header);
-        }
+
+        if (header.free_count != initial_free_count) pager.write_page(0, &header);
+        
         updateIndices(pager, header, row, rid);
 
         return {true, "Row inserted successfully", rid};
-
-    } catch (const std::exception& e) {
-        return {false, std::string("Insert failed: ") + e.what(), {0, 0}};
-    }
+    } catch (const std::exception& e) { return {false, e.what(), {0, 0}}; }
 }
 
 RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
@@ -88,15 +93,26 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
 }
 
 void TableManager::updateIndices(Pager& pager, TableHeader& header, const Row& row, const RecordID& rid) {
+    bool any_index_updated = false;
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (header.columns[i].is_indexed) {
-            if (header.columns[i].type == 0) { 
-                BP_tree<int> index(pager, header.root_page_id);
+            if (header.columns[i].type == 0) {
+                BP_tree<int> index(pager, header.root_page_ids[i]);
                 index.insert(row[i].int_val, rid);
-                pager.write_page(0, &header);
+                any_index_updated = true;
+            } 
+            else {
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
+                IndexKeyStr key;
+                std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
+                key.data[TYPE_STR_SIZE - 1] = '\0';
+                index.insert(key, rid);
+                any_index_updated = true;
             }
-            break; 
         }
+    }
+    if (any_index_updated) {
+        pager.write_page(0, &header);
     }
 }
 
@@ -210,93 +226,129 @@ void TableManager::applyAggregates(const Row& row, const TableHeader& header,
     }
 }
 
-Result TableManager::executeSelect(const std::string& full_path, 
-                                 const ExpressionNode* cond, 
+Result TableManager::executeSelect(const std::string& full_path, const ExpressionNode* cond, 
                                  const std::vector<std::string>& selectedCols, 
                                  const std::map<std::string, std::string>& aliases,
                                  const std::vector<AggregateRequest>& aggs) {
     try {
-        Pager pager(full_path);
-        TableHeader header;
-        pager.read_page(0, &header);
+        Pager pager(full_path); TableHeader header; pager.read_page(0, &header);
+
+        uint32_t first_root = 0;
+        for(int i=0; i < MAX_COLUMNS; ++i) {
+            if(header.root_page_ids[i] != 0) { first_root = header.root_page_ids[i]; break; }
+        }
+
+        if (first_root == 0) { 
+            if (!aggs.empty()) renderAggregates(aggs, 0, 0);
+            else std::cout << "[]\n";
+            return {true, "Empty"}; 
+        }
 
         bool isAgg = !aggs.empty();
         long long t_sum = 0; int t_count = 0; bool first = true;
         auto colsToPrint = getProjection(header, selectedCols);
 
-        if (pager.get_page_count() < 2) { 
-            if (isAgg) renderAggregates(aggs, 0, 0);
-            else std::cout << "[]\n"; 
-            return {true, "Empty"}; 
-        }
-
-        if (cond && !cond->is_op && cond->op == "==") {
-            int indexedColIdx = -1;
-            for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-                    indexedColIdx = c;
-                    break;
-                }
-            }
-
-            if (indexedColIdx != -1) {
-                BP_tree<int> index(pager, header.root_page_id);
-                RecordID rid;
-
-                if (index.find(std::stoi(cond->val1), rid).success) {
-                    char buf[PAGE_SIZE]; 
-                    pager.read_page(rid.page_id, buf);
-                    Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
-                    
-                    if (!isAgg) std::cout << "[\n";
-                    processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
-                    
-                    if (isAgg) renderAggregates(aggs, t_sum, t_count);
-                    else std::cout << "\n]\n";
-                    
-                    return {true, "Optimized Success"};
-                } else {
-                    if (isAgg) renderAggregates(aggs, 0, 0);
-                    else std::cout << "[]\n";
-                    return {true, "Not found in index"};
-                }
-            }
-        }
-
-        if (!isAgg) std::cout << "[\n";
-        char buf[PAGE_SIZE];
-        for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-            pager.read_page(p, buf);
-            int slots = PAGE_SIZE / header.row_size;
-            for (int i = 0; i < slots; ++i) {
-                char* slot_ptr = buf + (i * header.row_size);
-                bool occ; std::memcpy(&occ, slot_ptr, 1);
-                if (!occ) continue;
-
-                Row row = RecordManager::extractRow(slot_ptr, header);
-                processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
-            }
+        if (!executePointQuery(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first)) {
+            if (!isAgg) std::cout << "[\n";
+            executeTreeScan(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first);
+            if (!isAgg) std::cout << "\n]\n";
         }
 
         if (isAgg) renderAggregates(aggs, t_sum, t_count);
-        else std::cout << "\n]\n";
-
         return {true, "Success"};
     } catch (const std::exception& e) { return {false, e.what()}; }
 }
 
-std::vector<uint32_t> TableManager::getProjection(const TableHeader& header, const std::vector<std::string>& selectedCols) {
-    std::vector<uint32_t> projection;
-    if (selectedCols.empty()) {
-        for (uint32_t c = 0; c < header.column_count; ++c) projection.push_back(c);
-    } else {
-        for (const auto& sc : selectedCols) {
-            for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == sc) { projection.push_back(c); break; }
+void TableManager::executeTreeScan(Pager& pager, const TableHeader& header, const ExpressionNode* cond, 
+                               const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                               const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
+
+    uint32_t root_id = 0;
+    for(int i=0; i < MAX_COLUMNS; ++i) {
+        if(header.root_page_ids[i] != 0) { root_id = header.root_page_ids[i]; break; }
+    }
+
+    if (root_id == 0) return;
+
+    BP_tree<int> index(pager, root_id);
+
+    index.for_each([&](const RecordID& rid) {
+        char data_buf[PAGE_SIZE];
+        pager.read_page(rid.page_id, data_buf);
+
+        Row row = RecordManager::extractRow(data_buf + (rid.slot_id * header.row_size), header);
+        processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, !aggs.empty());
+    });
+}
+
+bool TableManager::executePointQuery(Pager& pager, const TableHeader& header, const ExpressionNode* cond, 
+                                     const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                                     const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
+
+    if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) {
+        return false;
+    }
+
+    int indexedColIdx = -1;
+    for (uint32_t c = 0; c < header.column_count; ++c) {
+        if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
+            indexedColIdx = c;
+            break;
+        }
+    }
+
+    if (indexedColIdx == -1) return false;
+
+    RecordID rid;
+    Result search_res = {false, ""};
+    bool isAgg = !aggs.empty();
+
+    uint32_t current_root = header.root_page_ids[indexedColIdx];
+
+    if (header.columns[indexedColIdx].type == 0) {
+        BP_tree<int> index(pager, current_root);
+        search_res = index.find(std::stoi(cond->val1), rid);
+    } 
+    else {
+        BP_tree<IndexKeyStr> index(pager, current_root);
+        IndexKeyStr searchKey;
+        std::strncpy(searchKey.data, cond->val1.c_str(), TYPE_STR_SIZE - 1);
+        searchKey.data[TYPE_STR_SIZE - 1] = '\0';
+        search_res = index.find(searchKey, rid);
+    }
+    if (search_res.success) {
+        alignas(PAGE_SIZE) char buf[PAGE_SIZE];
+        pager.read_page(rid.page_id, buf);
+        Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
+        
+        if (!isAgg) std::cout << "[\n";
+        processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
+        
+        if (!isAgg) std::cout << "\n]\n";
+        return true;
+    }
+    if (!isAgg) std::cout << "[]\n"; 
+    else renderAggregates(aggs, 0, 0);
+    
+    return true;
+}
+
+Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header, const ExpressionNode* cond, RecordID& out_rid) {
+    if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) return {false, "No index"};
+
+    for (uint32_t c = 0; c < header.column_count; ++c) {
+        if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
+            if (header.columns[c].type == 0) { // INT
+                BP_tree<int> index(pager, header.root_page_ids[c]); // ИСПРАВЛЕНО
+                return index.find(std::stoi(cond->val1), out_rid);
+            } else { // STR
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[c]); // ИСПРАВЛЕНО
+                IndexKeyStr key; std::strncpy(key.data, cond->val1.c_str(), 63);
+                return index.find(key, out_rid);
             }
         }
     }
-    return projection;
+    return {false, "Not indexed"};
 }
 
 void TableManager::processRow(const Row& row, const TableHeader& header, const ExpressionNode* cond, 
@@ -333,59 +385,58 @@ Result TableManager::executeUpdate(const std::string& full_path, const Expressio
         Pager pager(full_path);
         TableHeader header;
         pager.read_page(0, &header);
-        char page_buffer[PAGE_SIZE];
+        RecordID rid;
         bool header_changed = false;
 
-        if (cond && !cond->is_op && cond->op == "==") {
-            int indexedColIdx = -1;
+        if (getRIDFromIndex(pager, header, cond, rid).success) {
+            char buf[PAGE_SIZE];
+            pager.read_page(rid.page_id, buf);
+            char* slot_ptr = buf + (rid.slot_id * header.row_size);
+            Row row = RecordManager::extractRow(slot_ptr, header);
+
             for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-                    indexedColIdx = c; break;
+                if (std::string(header.columns[c].name) == targetCol) {
+                    updateFieldAndIndex(row, c, newVal, header, pager, rid, header_changed);
+                    
+                    RecordManager::serializeRow(row, slot_ptr, header);
+                    pager.write_page(rid.page_id, buf);
+                    if (header_changed) pager.write_page(0, &header);
+                    return {true, "Successfully updated 1 row (Optimized)"};
                 }
-            }
-
-            if (indexedColIdx != -1 && header.columns[indexedColIdx].type == 0) {
-                BP_tree<int> index(pager, header.root_page_id);
-                RecordID rid;
-
-                if (index.find(std::stoi(cond->val1), rid).success) {
-                    pager.read_page(rid.page_id, page_buffer);
-                    char* slot_ptr = page_buffer + (rid.slot_id * header.row_size);
-                    Row row = RecordManager::extractRow(slot_ptr, header);
-
-                    for (uint32_t c = 0; c < header.column_count; ++c) {
-                        if (std::string(header.columns[c].name) == targetCol) {
-                            updateFieldAndIndex(row, c, newVal, header, pager, rid, header_changed);
-                            RecordManager::serializeRow(row, slot_ptr, header);
-                            pager.write_page(rid.page_id, page_buffer);
-                            if (header_changed) pager.write_page(0, &header);
-                            
-                            return {true, "Successfully updated 1 row (Optimized via B+ Tree)"};
-                        }
-                    }
-                }
-                return {false, "Key not found in index"};
             }
         }
-        return {false, "Error: Update requires an indexed column with '==' condition."};
-
-    } catch (const std::exception& e) { 
-        return {false, std::string("Update Error: ") + e.what(), {0,0}}; 
-    }
+        return {false, "Update failed: indexed column required."};
+    } catch (const std::exception& e) { return {false, e.what(), {0,0}}; }
 }
 
 void TableManager::updateFieldAndIndex(Row& row, uint32_t colIdx, const std::string& newVal, 
                                       TableHeader& header, Pager& pager, RecordID rid, bool& header_changed) {
     const auto& col = header.columns[colIdx];
-    if (col.is_indexed && col.type == 0) {
-        BP_tree<int> index(pager, header.root_page_id);
+
+    // ОЧИСТКА КАВЫЧЕК
+    std::string cleanVal = newVal;
+    if (cleanVal.size() >= 2 && cleanVal.front() == '"' && cleanVal.back() == '"') {
+        cleanVal = cleanVal.substr(1, cleanVal.size() - 2);
+    }
+
+    if (col.is_indexed && col.type == 0) { // INT
+        BP_tree<int> index(pager, header.root_page_ids[colIdx]);
         index.erase(row[colIdx].int_val);
-        row[colIdx] = Value(std::stoi(newVal));
+        row[colIdx] = Value(std::stoi(cleanVal));
         index.insert(row[colIdx].int_val, rid);
         header_changed = true;
+    } else if (col.is_indexed && col.type == 1) { // STR
+        BP_tree<IndexKeyStr> index(pager, header.root_page_ids[colIdx]);
+        IndexKeyStr oldK, newK;
+        std::strncpy(oldK.data, row[colIdx].str_val.c_str(), 63);
+        std::strncpy(newK.data, cleanVal.c_str(), 63);
+        index.erase(oldK);
+        row[colIdx] = Value(cleanVal);
+        index.insert(newK, rid);
+        header_changed = true;
     } else {
-        if (col.type == 0) row[colIdx] = Value(std::stoi(newVal));
-        else row[colIdx] = Value(newVal);
+        if (col.type == 0) row[colIdx] = Value(std::stoi(cleanVal));
+        else row[colIdx] = Value(cleanVal);
     }
 }
 
@@ -394,45 +445,73 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
         Pager pager(full_path);
         TableHeader header;
         pager.read_page(0, &header);
-        char page_buffer[PAGE_SIZE];
+        RecordID rid;
 
-        if (cond && !cond->is_op && cond->op == "==") {
-            int indexedColIdx = -1;
-            for (uint32_t c = 0; c < header.column_count; ++c) {
-                if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-                    indexedColIdx = c; break;
+        // 1. Находим адрес записи через один из индексов
+        if (getRIDFromIndex(pager, header, cond, rid).success) {
+            char buf[PAGE_SIZE];
+            pager.read_page(rid.page_id, buf);
+            char* slot_ptr = buf + (rid.slot_id * header.row_size);
+
+            // --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Удаляем ключи из ВСЕХ индексов таблицы ---
+            // Сначала вычитываем строку, которую собираемся удалить
+            Row rowToDelete = RecordManager::extractRow(slot_ptr, header);
+
+            for (uint32_t i = 0; i < header.column_count; ++i) {
+                if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
+                    if (header.columns[i].type == 0) { // INT
+                        BP_tree<int> index(pager, header.root_page_ids[i]);
+                        index.erase(rowToDelete[i].int_val);
+                    } else { // STR
+                        BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
+                        IndexKeyStr key;
+                        std::strncpy(key.data, rowToDelete[i].str_val.c_str(), TYPE_STR_SIZE - 1);
+                        key.data[TYPE_STR_SIZE - 1] = '\0';
+                        index.erase(key);
+                    }
                 }
             }
+            // -----------------------------------------------------------------------
 
-            if (indexedColIdx != -1 && header.columns[indexedColIdx].type == 0) {
-                BP_tree<int> index(pager, header.root_page_id);
-                RecordID rid;
+            // 2. Помечаем строку удаленной в файле данных
+            bool new_status = false;
+            std::memcpy(slot_ptr, &new_status, sizeof(bool));
 
-                if (index.find(std::stoi(cond->val1), rid).success) {
-                    pager.read_page(rid.page_id, page_buffer);
-                    char* slot_ptr = page_buffer + (rid.slot_id * header.row_size);
+            // 3. Логика Free List
+            if (RecordManager::isPageEmpty(buf, header.row_size) && header.free_count < 100) {
+                header.free_list[header.free_count++] = rid.page_id;
+                std::memset(buf, 0, PAGE_SIZE);
+            }
+            
+            pager.write_page(rid.page_id, buf);
+            pager.write_page(0, &header); // Сохраняем обновленные корни и Free List
+            return {true, "Successfully deleted 1 row and updated all indices."};
+        }
+        return {false, "Delete failed: key not found in index."};
+    } catch (const std::exception& e) { return {false, e.what(), {0,0}}; }
+}
 
-                    index.erase(std::stoi(cond->val1));
+Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header, const ExpressionNode* cond, RecordID& out_rid) {
+    if (!cond || cond->is_op) return {false, "Not a simple condition"};
+    if (cond->op != "==" && cond->op != "=") return {false, "Not an equality operator"};
 
-                    bool new_status = false;
-                    std::memcpy(slot_ptr, &new_status, sizeof(bool));
-                    if (RecordManager::isPageEmpty(page_buffer, header.row_size) && header.free_count < 100) {
-                        header.free_list[header.free_count++] = rid.page_id;
-                        std::memset(page_buffer, 0, PAGE_SIZE);
-                    }
-                    
-                    pager.write_page(rid.page_id, page_buffer);
-                    pager.write_page(0, &header);
-                    return {true, "Successfully deleted 1 row (Optimized via B+ Tree)"};
-                }
-                return {false, "Key not found in index"};
+    for (uint32_t c = 0; c < header.column_count; ++c) {
+        if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
+            uint32_t& current_root = header.root_page_ids[c];
+
+            if (header.columns[c].type == 0) {
+                BP_tree<int> index(pager, current_root);
+                return index.find(std::stoi(cond->val1), out_rid);
+            } else {
+                BP_tree<IndexKeyStr> index(pager, current_root);
+                IndexKeyStr key;
+                std::strncpy(key.data, cond->val1.c_str(), TYPE_STR_SIZE - 1);
+                key.data[TYPE_STR_SIZE - 1] = '\0';
+                return index.find(key, out_rid);
             }
         }
-        return {false, "Error: Delete requires an indexed column with '==' condition for optimization."};
-
-    } catch (const std::exception& e) {
-        return {false, std::string("Delete Error: ") + e.what(), {0,0}};
     }
+    return {false, "No suitable index found"};
 }
 
 Result TableManager::dropTable(const std::string& full_path) {
