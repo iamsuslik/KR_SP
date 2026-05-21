@@ -1,4 +1,4 @@
-#include "../include/Pager.h"
+#include "Pager.h"
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>

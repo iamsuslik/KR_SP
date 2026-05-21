@@ -4,11 +4,11 @@
 #include <fstream>
 #include <chrono>
 
-#include "modules/shared/include/common.h"
-#include "modules/core/include/HierarchyManager.h"
-#include "modules/logic/include/TableManager.h"
-#include "modules/api/include/SQLParser.h"
-#include "modules/logger/include/Logger.h"
+#include "common.h"
+#include "HierarchyManager.h"
+#include "TableManager.h"
+#include "SQLParser.h"
+#include "Logger.h"
 
 
 void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser, bool isInteractive) {

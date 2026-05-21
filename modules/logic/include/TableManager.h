@@ -1,8 +1,8 @@
 #ifndef TABLE_MANAGER_H
 #define TABLE_MANAGER_H
 
-#include "../../shared/include/common.h"
-#include "../../core/include/Pager.h"
+#include "common.h"
+#include "Pager.h"
 #include "RecordManager.h"
 #include <vector>
 #include <string>
