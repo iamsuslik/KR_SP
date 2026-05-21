@@ -1,6 +1,7 @@
 #include "TableManager.h"
 #include "BPlusTree.h"
 #include "RecordManager.h"
+#include "TablePageManager.h"
 #include <iostream>
 #include <cstring>
 #include <regex>
@@ -34,17 +35,18 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         TableHeader header;
         pager.read_page(0, &header);
 
+        TablePageManager pm(pager, header);
+
         for (uint32_t i = 0; i < header.column_count; ++i) {
             if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
                 if (header.columns[i].type == 0) { // INT
-                    BP_tree<int> index(pager, header.root_page_ids[i]);
+                    BP_tree<int> index(pager, header.root_page_ids[i], pm); // Передали pm
                     if (index.contains(row[i].int_val)) 
                         return {false, "Constraint Error: Duplicate value in column '" + std::string(header.columns[i].name) + "'", {0,0}};
                 } else { // STR
-                    BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
-                    IndexKeyStr key;
+                    BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm); // Передали pm
+                    IndexKeyStr key{};
                     std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-                    key.data[TYPE_STR_SIZE - 1] = '\0';
                     if (index.contains(key)) 
                         return {false, "Constraint Error: Duplicate value in column '" + std::string(header.columns[i].name) + "'", {0,0}};
                 }
@@ -71,16 +73,31 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
 }
 
 RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
-    char page_buffer[PAGE_SIZE];
+    // 1. Сначала всегда берем из Free List (это самый быстрый и правильный путь)
     if (header.free_count > 0) {
         uint32_t reused_p = header.free_list[--header.free_count];
-        std::memset(page_buffer, 0, PAGE_SIZE);
-        pager.write_page(reused_p, page_buffer);
-        
+        char clean_page[PAGE_SIZE] = {0};
+        pager.write_page(reused_p, clean_page);
         return {reused_p, 0};
     }
+
+    // 2. Если Free List пуст, ищем пустые слоты в существующих страницах
     int slots_per_page = PAGE_SIZE / header.row_size;
+    char page_buffer[PAGE_SIZE];
+
     for (uint32_t p_id = 1; p_id < pager.get_page_count(); ++p_id) {
+        // Пропускаем страницы, которые являются корнями индексов
+        bool protected_page = false;
+        for(int i=0; i<MAX_COLUMNS; ++i) {
+            if(header.root_page_ids[i] == p_id) { protected_page = true; break; }
+        }
+        // ВАЖНО: Пропускаем страницы, которые уже есть в free_list (защита от двойного выделения)
+        for(uint32_t i=0; i < header.free_count; ++i) {
+            if(header.free_list[i] == p_id) { protected_page = true; break; }
+        }
+
+        if(protected_page) continue;
+
         pager.read_page(p_id, page_buffer);
         for (int i = 0; i < slots_per_page; ++i) {
             bool occupied;
@@ -88,32 +105,32 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
             if (!occupied) return {p_id, (uint32_t)i};
         }
     }
-    uint32_t new_p = pager.allocate_page();
-    return {new_p, 0};
+
+    // 3. Если места нет совсем — выделяем новую страницу в конце файла
+    return {pager.allocate_page(), 0};
 }
 
 void TableManager::updateIndices(Pager& pager, TableHeader& header, const Row& row, const RecordID& rid) {
     bool any_index_updated = false;
+    TablePageManager pm(pager, header); // Добавили
+
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (header.columns[i].is_indexed) {
             if (header.columns[i].type == 0) {
-                BP_tree<int> index(pager, header.root_page_ids[i]);
+                BP_tree<int> index(pager, header.root_page_ids[i], pm); // Передали pm
                 index.insert(row[i].int_val, rid);
                 any_index_updated = true;
             } 
             else {
-                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
-                IndexKeyStr key;
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm); // Передали pm
+                IndexKeyStr key{};
                 std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-                key.data[TYPE_STR_SIZE - 1] = '\0';
                 index.insert(key, rid);
                 any_index_updated = true;
             }
         }
     }
-    if (any_index_updated) {
-        pager.write_page(0, &header);
-    }
+    if (any_index_updated) pager.write_page(0, &header);
 }
 
 bool TableManager::matches(const Row& row, const TableHeader& header, const ExpressionNode* node) {
@@ -309,46 +326,62 @@ bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const Ex
                                      const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
                                      const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
 
+    // 1. Проверяем, что условие подходит для точечного поиска (column = value)
     if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) {
         return false;
     }
 
+    // 2. Ищем, есть ли индекс на этой колонке
     int indexedColIdx = -1;
     for (uint32_t c = 0; c < header.column_count; ++c) {
         if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-            indexedColIdx = c;
+            indexedColIdx = (int)c;
             break;
         }
     }
 
-    if (indexedColIdx == -1) return false;
+    if (indexedColIdx == -1) return false; // Индекса нет, идем в Full Scan
+
+    // 3. Создаем нашего менеджера для работы с деревом
+    TablePageManager pm(pager, header);
 
     RecordID rid;
     Result search_res = {false, ""};
     bool isAgg = !aggs.empty();
 
-    uint32_t current_root = header.root_page_ids[indexedColIdx];
-
-    if (header.columns[indexedColIdx].type == 0) {
-        BP_tree<int> index(pager, current_root);
-        search_res = index.find(std::stoi(cond->val1), rid);
-    } 
-    else {
-        BP_tree<IndexKeyStr> index(pager, current_root);
-        IndexKeyStr searchKey;
-        std::strncpy(searchKey.data, cond->val1.c_str(), TYPE_STR_SIZE - 1);
-        searchKey.data[TYPE_STR_SIZE - 1] = '\0';
-        search_res = index.find(searchKey, rid);
+    // Безопасно чистим значение для поиска от кавычек
+    std::string searchVal = cond->val1;
+    if (searchVal.size() >= 2 && searchVal.front() == '"' && searchVal.back() == '"') {
+        searchVal = searchVal.substr(1, searchVal.size() - 2);
     }
+
+    // 4. Выполняем поиск в зависимости от типа данных
+    try {
+        if (header.columns[indexedColIdx].type == 0) { // INT
+            BP_tree<int> index(pager, header.root_page_ids[indexedColIdx], pm);
+            search_res = index.find(std::stoi(searchVal), rid);
+        } 
+        else { // STR
+            BP_tree<IndexKeyStr> index(pager, header.root_page_ids[indexedColIdx], pm);
+            IndexKeyStr searchKey{};
+            std::strncpy(searchKey.data, searchVal.c_str(), TYPE_STR_SIZE - 1);
+            search_res = index.find(searchKey, rid);
+        }
+    } catch (...) {
+        return false; // Ошибка формата (например, буквы в INT колонке)
+    }
+
+    // 5. Если нашли — извлекаем и выводим
     if (search_res.success) {
         alignas(PAGE_SIZE) char buf[PAGE_SIZE];
         pager.read_page(rid.page_id, buf);
+        
         Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
         
         if (!isAgg) std::cout << "[\n";
         processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
-        
         if (!isAgg) std::cout << "\n]\n";
+        
         return true;
     }
     if (!isAgg) std::cout << "[]\n"; 
@@ -456,6 +489,11 @@ int TableManager::fullScanUpdate(Pager& pager, TableHeader& header, const Expres
 
         // Если на странице были изменения — сохраняем её
         if (page_changed) {
+            if (RecordManager::isPageEmpty(page_buffer, header.row_size) && header.free_count < MAX_FREE_PAGES) {
+                header.free_list[header.free_count++] = p;
+                std::memset(page_buffer, 0, PAGE_SIZE);
+                header_changed = true;
+            }
             pager.write_page(p, page_buffer);
         }
     }
@@ -471,63 +509,50 @@ int TableManager::fullScanUpdate(Pager& pager, TableHeader& header, const Expres
 void TableManager::updateFieldAndIndex(Row& row, uint32_t colIdx, const std::string& newVal, 
                                       TableHeader& header, Pager& pager, RecordID rid, bool& header_changed) {
     const auto& col = header.columns[colIdx];
+    TablePageManager pm(pager, header); // Добавили
 
-    // 1. УЛУЧШЕННАЯ ОЧИСТКА КАВЫЧЕК (убирает любое количество вложенных кавычек)
     std::string cleanVal = newVal;
-    while (!cleanVal.empty() && cleanVal.front() == '"') cleanVal.erase(0, 1);
-    while (!cleanVal.empty() && cleanVal.back() == '"') cleanVal.pop_back();
+    if (cleanVal.size() >= 2 && cleanVal.front() == '"' && cleanVal.back() == '"') {
+        cleanVal = cleanVal.substr(1, cleanVal.size() - 2);
+    }
 
     try {
-        // 2. СЛУЧАЙ: Колонку нужно обновить в B+ дереве (INDEXED)
         if (col.is_indexed) {
-            if (col.type == 0) { // INT индекс
-                BP_tree<int> index(pager, header.root_page_ids[colIdx]);
-                
-                // Удаляем старое значение из дерева, вставляем новое
+            if (col.type == 0) {
+                BP_tree<int> index(pager, header.root_page_ids[colIdx], pm); // Передали pm
                 index.erase(row[colIdx].int_val);
                 int intVal = std::stoi(cleanVal);
                 row[colIdx] = Value(intVal);
                 index.insert(intVal, rid);
             } 
-            else { // STR индекс
-                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[colIdx]);
-                
-                IndexKeyStr oldK{}, newK{}; // Обнуляем структуры
+            else {
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[colIdx], pm); // Передали pm
+                IndexKeyStr oldK{}, newK{};
                 std::strncpy(oldK.data, row[colIdx].str_val.c_str(), TYPE_STR_SIZE - 1);
                 std::strncpy(newK.data, cleanVal.c_str(), TYPE_STR_SIZE - 1);
-                
                 index.erase(oldK);
                 row[colIdx] = Value(cleanVal);
                 index.insert(newK, rid);
             }
-            header_changed = true; // Помечаем, что корень дерева мог измениться
-        } 
-        // 3. СЛУЧАЙ: Обычное поле без индекса
-        else {
-            if (col.type == 0) {
-                row[colIdx] = Value(std::stoi(cleanVal));
-            } else {
-                row[colIdx] = Value(cleanVal);
-            }
+            header_changed = true;
+        } else {
+            if (col.type == 0) row[colIdx] = Value(std::stoi(cleanVal));
+            else row[colIdx] = Value(cleanVal);
         }
-    } catch (...) {
-        // Если stoi не смог конвертировать строку, оставляем старое значение или пишем 0
-        std::cerr << "[Update Error] Invalid format for column " << col.name << "\n";
-    }
+    } catch (...) { std::cerr << "[Update Error] Invalid format for " << col.name << "\n"; }
 }
 
 void TableManager::clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row) {
+    TablePageManager pm(pager, header); // Добавили
     for (uint32_t i = 0; i < header.column_count; ++i) {
-        // Если у колонки есть индекс
         if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
-            if (header.columns[i].type == 0) { // INT
-                BP_tree<int> index(pager, header.root_page_ids[i]);
+            if (header.columns[i].type == 0) {
+                BP_tree<int> index(pager, header.root_page_ids[i], pm); // Передали pm
                 index.erase(row[i].int_val);
-            } else { // STR
-                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i]);
-                IndexKeyStr key;
+            } else {
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm); // Передали pm
+                IndexKeyStr key{};
                 std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-                key.data[TYPE_STR_SIZE - 1] = '\0';
                 index.erase(key);
             }
         }
@@ -616,18 +641,17 @@ Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header, const Ex
     if (!cond || cond->is_op) return {false, "Not a simple condition"};
     if (cond->op != "==" && cond->op != "=") return {false, "Not an equality operator"};
 
+    TablePageManager pm(pager, header);
+
     for (uint32_t c = 0; c < header.column_count; ++c) {
         if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-            uint32_t& current_root = header.root_page_ids[c];
-
             if (header.columns[c].type == 0) {
-                BP_tree<int> index(pager, current_root);
+                BP_tree<int> index(pager, header.root_page_ids[c], pm);
                 return index.find(std::stoi(cond->val1), out_rid);
             } else {
-                BP_tree<IndexKeyStr> index(pager, current_root);
-                IndexKeyStr key;
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[c], pm);
+                IndexKeyStr key{};
                 std::strncpy(key.data, cond->val1.c_str(), TYPE_STR_SIZE - 1);
-                key.data[TYPE_STR_SIZE - 1] = '\0';
                 return index.find(key, out_rid);
             }
         }

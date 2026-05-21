@@ -97,8 +97,9 @@ Row RecordManager::extractRow(char* slot_ptr, const TableHeader& header) {
                 row.push_back(Value(v)); 
                 off += TYPE_INT_SIZE;
             } else {
-                char s[TYPE_STR_SIZE] = {0};
+                char s[TYPE_STR_SIZE];
                 std::memcpy(s, slot_ptr + off, TYPE_STR_SIZE);
+                s[TYPE_STR_SIZE - 1] = '\0';
                 row.push_back(Value(std::string(s))); 
                 off += TYPE_STR_SIZE;
             }

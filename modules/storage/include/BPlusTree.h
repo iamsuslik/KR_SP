@@ -4,6 +4,7 @@
 #include "common.h"
 #include "Pager.h"
 #include "comparators.h"
+#include "IPageManager.h"
 #include <vector>
 #include <new>
 #include <iostream>
@@ -89,12 +90,13 @@ private:
     #pragma pack(pop)
 
     Pager& _pager;
-    uint32_t& _root_id; 
+    uint32_t& _root_id;
+    IPageManager& _page_manager; 
     size_t _total_size;
 
 public:
-    explicit BP_tree(Pager& pager, uint32_t& root_ref, const compare& cmp = compare()) 
-        : compare(cmp), _pager(pager), _root_id(root_ref), _total_size(0) {}
+    explicit BP_tree(Pager& pager, uint32_t& root_ref, IPageManager& pm, const compare& cmp = compare()) 
+        : compare(cmp), _pager(pager), _root_id(root_ref), _page_manager(pm), _total_size(0) {}
 
     Result insert(const tkey& key, const RecordID& rid);
     Result erase(const tkey& key);
@@ -477,15 +479,16 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     std::vector<uint32_t> path;
     uint32_t leaf_id = find_path(key, path);
 
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     _pager.read_page(leaf_id, buffer);
     auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
 
     size_t pos = binary_search_in_node(leaf, key);
 
     if (pos < leaf->_count) {
-        size_t num_to_move = leaf->_count - pos;
-        std::memmove(&leaf->_data[pos + 1], &leaf->_data[pos], num_to_move * sizeof(tree_data_type));
+        for (size_t k = leaf->_count; k > pos; --k) {
+            leaf->_data[k] = leaf->_data[k - 1];
+        }
     }
 
     leaf->_data[pos] = std::make_pair(key, rid);
@@ -528,9 +531,11 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
         return {false, "Key not found", {0,0}};
     }
     size_t del_pos = actual_idx - 1;
-    size_t num_to_move = leaf->_count - actual_idx;
-    if (num_to_move > 0) {
-        std::memmove(&leaf->_data[del_pos], &leaf->_data[del_pos + 1], num_to_move * sizeof(tree_data_type));
+
+    if (actual_idx < leaf->_count) {
+        for (size_t k = del_pos; k < leaf->_count - 1; ++k) {
+            leaf->_data[k] = leaf->_data[k + 1];
+        }
     }
     leaf->_count--;
     _pager.write_page(leaf_id, buffer);
@@ -601,7 +606,7 @@ template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent_id) 
 {
-    alignas(4096) char c_buf[PAGE_SIZE], p_buf[PAGE_SIZE], s_buf[PAGE_SIZE];
+    alignas(PAGE_SIZE) char c_buf[PAGE_SIZE], p_buf[PAGE_SIZE], s_buf[PAGE_SIZE];
     
     _pager.read_page(curr_id, c_buf);
     _pager.read_page(parent_id, p_buf);
@@ -612,6 +617,8 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
     while (idx <= parent->_count && parent->_pointers[idx] != curr_id) {
         idx++;
     }
+
+    // СЛУЧАЙ А: Занимаем у ПРАВОГО соседа
     if (idx < parent->_count) {
         uint32_t sib_id = parent->_pointers[idx + 1];
         _pager.read_page(sib_id, s_buf);
@@ -623,7 +630,10 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
                 auto* s_leaf = reinterpret_cast<bptree_node_term*>(s_buf);
 
                 c_leaf->_data[c_leaf->_count] = std::move(s_leaf->_data[0]);
-                std::memmove(&s_leaf->_data[0], &s_leaf->_data[1], (s_leaf->_count - 1) * sizeof(tree_data_type));
+                // ЗАМЕНА memmove: Сдвигаем данные соседа влево
+                for (uint32_t k = 0; k < sib->_count - 1; ++k) {
+                    s_leaf->_data[k] = std::move(s_leaf->_data[k + 1]);
+                }
                 parent->_keys[idx] = s_leaf->_data[0].first;
             } 
             else {
@@ -634,8 +644,14 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
                 c_mid->_pointers[c_mid->_count + 1] = s_mid->_pointers[0];
                 parent->_keys[idx] = std::move(s_mid->_keys[0]);
 
-                std::memmove(&s_mid->_keys[0], &s_mid->_keys[1], (s_mid->_count - 1) * sizeof(tkey));
-                std::memmove(&s_mid->_pointers[0], &s_mid->_pointers[1], s_mid->_count * sizeof(uint32_t));
+                // ЗАМЕНА memmove: Сдвигаем ключи соседа влево
+                for (uint32_t k = 0; k < sib->_count - 1; ++k) {
+                    s_mid->_keys[k] = std::move(s_mid->_keys[k + 1]);
+                }
+                // Сдвигаем указатели соседа влево
+                for (uint32_t k = 0; k < sib->_count; ++k) {
+                    s_mid->_pointers[k] = s_mid->_pointers[k + 1];
+                }
             }
             curr->_count++; sib->_count--;
             _pager.write_page(curr_id, c_buf); 
@@ -644,6 +660,8 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
             return true;
         }
     }
+
+    // СЛУЧАЙ Б: Занимаем у ЛЕВОГО соседа
     if (idx > 0) {
         uint32_t sib_id = parent->_pointers[idx - 1];
         _pager.read_page(sib_id, s_buf);
@@ -653,16 +671,27 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
             if (curr->_is_terminate) {
                 auto* c_leaf = reinterpret_cast<bptree_node_term*>(c_buf);
                 auto* s_leaf = reinterpret_cast<bptree_node_term*>(s_buf);
-                std::memmove(&c_leaf->_data[1], &c_leaf->_data[0], c_leaf->_count * sizeof(tree_data_type));
+                
+                // ЗАМЕНА memmove: Освобождаем место в начале (сдвиг вправо)
+                for (uint32_t k = curr->_count; k > 0; --k) {
+                    c_leaf->_data[k] = std::move(c_leaf->_data[k - 1]);
+                }
                 c_leaf->_data[0] = std::move(s_leaf->_data[sib->_count - 1]);
-
                 parent->_keys[idx - 1] = c_leaf->_data[0].first;
             } 
             else {
                 auto* c_mid = reinterpret_cast<bptree_node_middle*>(c_buf);
                 auto* s_mid = reinterpret_cast<bptree_node_middle*>(s_buf);
-                std::memmove(&c_mid->_keys[1], &c_mid->_keys[0], c_mid->_count * sizeof(tkey));
-                std::memmove(&c_mid->_pointers[1], &c_mid->_pointers[0], (c_mid->_count + 1) * sizeof(uint32_t));
+                
+                // ЗАМЕНА memmove: Сдвигаем ключи вправо
+                for (uint32_t k = curr->_count; k > 0; --k) {
+                    c_mid->_keys[k] = std::move(c_mid->_keys[k - 1]);
+                }
+                // Сдвигаем указатели вправо
+                for (uint32_t k = curr->_count + 1; k > 0; --k) {
+                    c_mid->_pointers[k] = c_mid->_pointers[k - 1];
+                }
+                
                 c_mid->_keys[0] = std::move(parent->_keys[idx - 1]);
                 c_mid->_pointers[0] = s_mid->_pointers[sib->_count];
                 parent->_keys[idx - 1] = std::move(s_mid->_keys[sib->_count - 1]);
@@ -699,71 +728,65 @@ void BP_tree<tkey, t, compare>::merge_sibling(uint32_t curr_id, uint32_t parent_
     _pager.read_page(r_id, r_buf);
 
     auto* l_base = reinterpret_cast<bptree_node_base*>(l_buf);
-    auto* r_base = reinterpret_cast<bptree_node_base*>(r_buf);
 
     if (l_base->_is_terminate) {
         auto* l_leaf = reinterpret_cast<bptree_node_term*>(l_buf);
         auto* r_leaf = reinterpret_cast<bptree_node_term*>(r_buf);
 
-        std::memcpy(&l_leaf->_data[l_leaf->_count], r_leaf->_data, r_leaf->_count * sizeof(tree_data_type));
+        // ЗАМЕНА memcpy: Копируем данные из правого листа в левый
+        for (uint32_t k = 0; k < r_leaf->_count; ++k) {
+            l_leaf->_data[l_leaf->_count + k] = std::move(r_leaf->_data[k]);
+        }
         l_leaf->_next = r_leaf->_next;
-        l_leaf->_count += r_base->_count;
+        l_leaf->_count += r_leaf->_count;
     } 
     else {
         auto* l_mid = reinterpret_cast<bptree_node_middle*>(l_buf);
         auto* r_mid = reinterpret_cast<bptree_node_middle*>(r_buf);
+        
         l_mid->_keys[l_mid->_count] = std::move(parent->_keys[left_idx]);
-        std::memcpy(&l_mid->_keys[l_mid->_count + 1], r_mid->_keys, r_mid->_count * sizeof(tkey));
-        std::memcpy(&l_mid->_pointers[l_mid->_count + 1], r_mid->_pointers, (r_mid->_count + 1) * sizeof(uint32_t));
+        
+        // ЗАМЕНА memcpy: Копируем ключи
+        for (uint32_t k = 0; k < r_mid->_count; ++k) {
+            l_mid->_keys[l_mid->_count + 1 + k] = std::move(r_mid->_keys[k]);
+        }
+        // Копируем указатели
+        for (uint32_t k = 0; k <= r_mid->_count; ++k) {
+            l_mid->_pointers[l_mid->_count + 1 + k] = r_mid->_pointers[k];
+        }
         
         l_mid->_count += 1 + r_mid->_count;
     }
 
+    // Обновляем родителя: убираем ключ и указатель, которые "схлопнулись"
     if (left_idx < parent->_count) {
-        std::memmove(&parent->_keys[left_idx], &parent->_keys[left_idx + 1], (parent->_count - left_idx - 1) * sizeof(tkey));
-        std::memmove(&parent->_pointers[left_idx + 1], &parent->_pointers[left_idx + 2], (parent->_count - left_idx) * sizeof(uint32_t));
+        // ЗАМЕНА memmove: Сдвигаем ключи влево
+        for (uint32_t k = left_idx; k < parent->_count - 1; ++k) {
+            parent->_keys[k] = std::move(parent->_keys[k + 1]);
+        }
+        // Сдвигаем указатели влево
+        for (uint32_t k = left_idx + 1; k < parent->_count; ++k) {
+            parent->_pointers[k] = parent->_pointers[k + 1];
+        }
     }
     parent->_count--;
     _pager.write_page(l_id, l_buf);
     _pager.write_page(parent_id, p_buf);
 
     release_page(r_id); 
-
     std::cout << "[FreeList] Page " << r_id << " merged and released.\n";
 }
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 uint32_t BP_tree<tkey, t, compare>::allocate_new_page() {
-    alignas(4096) char buffer[PAGE_SIZE];
-    _pager.read_page(0, buffer);
-    auto* header = reinterpret_cast<TableHeader*>(buffer);
-
-    if (header->free_count > 0) {
-        uint32_t reused_id = header->free_list[header->free_count - 1];
-        header->free_count--;
-        _pager.write_page(0, buffer);
-        alignas(4096) char clear_buf[PAGE_SIZE];
-        std::memset(clear_buf, 0, PAGE_SIZE);
-        _pager.write_page(reused_id, clear_buf);
-        
-        return reused_id;
-    }
-    return _pager.allocate_page();
+    return _page_manager.allocate();
 }
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::release_page(uint32_t page_id) {
-    alignas(4096) char buffer[PAGE_SIZE];
-    _pager.read_page(0, buffer);
-    auto* header = reinterpret_cast<TableHeader*>(buffer);
-
-    if (header->free_count < 100) {
-        header->free_list[header->free_count] = page_id;
-        header->free_count++;
-        _pager.write_page(0, buffer);
-    }
+    _page_manager.deallocate(page_id);
 }
 
 #endif

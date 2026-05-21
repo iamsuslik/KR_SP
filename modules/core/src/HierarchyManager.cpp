@@ -6,7 +6,7 @@ namespace fs = std::filesystem;
 
 HierarchyManager::HierarchyManager() {
     if (!fs::exists(ROOT_DIR)) {
-        fs::create_directory(ROOT_DIR);
+        fs::create_directories(ROOT_DIR);
         std::cout << "[System] Root directory '" << ROOT_DIR << "' created.\n";
     }
 }
@@ -16,7 +16,7 @@ Result HierarchyManager::createDatabase(const std::string& db_name) {
     if (fs::exists(db_path)) {
         return {false, "Error: Database '" + db_name + "' already exists."};
     }
-    if (fs::create_directory(db_path)) {
+    if (fs::create_directories(db_path)) {
         return {true, "Database '" + db_name + "' created successfully."};
     }
     return {false, "Fatal Error: Failed to create database directory."};

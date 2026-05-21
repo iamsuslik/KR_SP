@@ -8,8 +8,8 @@
 #include <memory>
 
 // 1. Базовые константы
-const int PAGE_SIZE = 4096;
-const int MAX_COLUMNS = 10;
+constexpr int PAGE_SIZE = 4096;
+const int MAX_COLUMNS = 32;
 const int MAX_FREE_PAGES = 100;
 const int MAX_NAME_LEN = 32;
 const int TYPE_STR_SIZE = 64;
