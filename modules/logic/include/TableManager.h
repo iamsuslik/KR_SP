@@ -67,9 +67,11 @@ private:
                              const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
                              const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
 
-    static void executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond,
-                           const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                           const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
+    static void executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
+                               const std::vector<uint32_t>& colsToPrint, 
+                               const std::map<std::string, std::string>& aliases,
+                               const std::vector<AggregateRequest>& aggs, 
+                               long long& t_sum, int& t_count, bool& first, bool isAgg);
     static int fullScanDelete(Pager& pager, TableHeader& header, const ExpressionNode* cond);
     static int fullScanUpdate(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                               const std::string& targetCol, const std::string& newVal);

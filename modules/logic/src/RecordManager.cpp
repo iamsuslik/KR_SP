@@ -23,21 +23,19 @@ Result RecordManager::serializeRow(const Row& input_row, char* out_slot, const T
         if (val == nullptr || val->is_null) {
             if (col.has_default) {
                 std::memcpy(out_slot + offset, col.default_val, (col.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE);
-                null_bitmap |= (1 << i); 
-                offset += (col.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+                null_bitmap |= (1 << i);
             } else if (col.is_not_null) {
                 return {false, "Constraint Error: Column '" + std::string(col.name) + "' is NOT NULL", {0,0}};
-            } else {
-                offset += (col.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
             }
-        } 
-        else {
+            offset += (col.type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+        } else {
             null_bitmap |= (1 << i);
             writeField(out_slot, offset, val, col);
         }
     }
+
     std::memcpy(out_slot + bitmap_offset, &null_bitmap, sizeof(uint16_t));
-    return {true, "OK", {0, 0}};
+    return {true, "OK", {0,0}};
 }
 
 void RecordManager::writeField(char* out_slot, int& offset, const Value* val, const ColumnSchema& col) {
@@ -83,8 +81,6 @@ void RecordManager::initColumnSchema(ColumnSchema& dest, const ColumnDef& src) {
 
 Row RecordManager::extractRow(char* slot_ptr, const TableHeader& header) {
     Row row;
-    row.reserve(header.column_count); 
-
     uint16_t null_bitmap;
     std::memcpy(&null_bitmap, slot_ptr + sizeof(bool), sizeof(uint16_t));
     
@@ -97,8 +93,7 @@ Row RecordManager::extractRow(char* slot_ptr, const TableHeader& header) {
             off += (header.columns[c].type == 0) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
         } else {
             if (header.columns[c].type == 0) {
-                int v; 
-                std::memcpy(&v, slot_ptr + off, TYPE_INT_SIZE);
+                int v; std::memcpy(&v, slot_ptr + off, TYPE_INT_SIZE);
                 row.push_back(Value(v)); 
                 off += TYPE_INT_SIZE;
             } else {

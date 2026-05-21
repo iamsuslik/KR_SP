@@ -274,7 +274,7 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
         // Передаем header без const_cast, так как мы уберем const из заголовка метода ниже
         if (!executePointQuery(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first)) {
             if (!isAgg) std::cout << "[\n";
-            executeTreeScan(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first);
+            executeTreeScan(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first, isAgg);
             if (!isAgg) std::cout << "\n]\n";
         }
 
@@ -284,25 +284,25 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
 }
 
 void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
-                               const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                               const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
+                                   const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                                   const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first, bool isAgg) {
 
-    uint32_t root_id = 0;
-    for(int i=0; i < MAX_COLUMNS; ++i) {
-        if(header.root_page_ids[i] != 0) { root_id = header.root_page_ids[i]; break; }
+    char page_buffer[PAGE_SIZE];
+    int slots_per_page = PAGE_SIZE / header.row_size;
+
+    for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
+        pager.read_page(p, page_buffer);
+
+        for (int i = 0; i < slots_per_page; ++i) {
+            char* slot_ptr = page_buffer + (i * header.row_size);
+            bool occupied; 
+            std::memcpy(&occupied, slot_ptr, sizeof(bool));
+            if (!occupied) continue; 
+            Row row = RecordManager::extractRow(slot_ptr, header);
+            if (row.size() >= 2 && row[0].is_null && row[1].is_null) continue;
+            processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
+        }
     }
-
-    if (root_id == 0) return;
-
-    BP_tree<int> index(pager, root_id);
-
-    index.for_each([&](const RecordID& rid) {
-        char data_buf[PAGE_SIZE];
-        pager.read_page(rid.page_id, data_buf);
-
-        Row row = RecordManager::extractRow(data_buf + (rid.slot_id * header.row_size), header);
-        processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, !aggs.empty());
-    });
 }
 
 bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
@@ -361,9 +361,6 @@ void TableManager::processRow(const Row& row, const TableHeader& header, const E
                              const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint, 
                              const std::map<std::string, std::string>& aliases, 
                              long long& t_sum, int& t_count, bool& first, bool isAgg) {
-
-    if (row.size() >= 2 && row[0].int_val == 0 && row[1].str_val == "") return;
-
     if (matches(row, header, cond)) {
         if (isAgg) {
             applyAggregates(row, header, aggs, t_sum, t_count);
@@ -573,38 +570,45 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
 
 int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ExpressionNode* cond) {
     int count = 0;
-    char buf[PAGE_SIZE];
+    char page_buffer[PAGE_SIZE];
     bool header_changed = false;
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        pager.read_page(p, buf);
+        pager.read_page(p, page_buffer);
         bool page_changed = false;
-
-        for (int i = 0; i < (PAGE_SIZE / header.row_size); ++i) {
-            char* slot_ptr = buf + (i * header.row_size);
-            bool occupied; std::memcpy(&occupied, slot_ptr, 1);
+        
+        int slots = PAGE_SIZE / header.row_size;
+        for (int i = 0; i < slots; ++i) {
+            char* slot_ptr = page_buffer + (i * header.row_size);
+            
+            bool occupied; 
+            std::memcpy(&occupied, slot_ptr, sizeof(bool));
+            
             if (!occupied) continue;
 
             Row row = RecordManager::extractRow(slot_ptr, header);
+
             if (matches(row, header, cond)) {
-                clearIndicesForRow(pager, header, row); // Чистим все деревья
-                bool status = false;
-                std::memcpy(slot_ptr, &status, 1); // Удаляем из файла
+                clearIndicesForRow(pager, header, row); 
+                std::memset(slot_ptr, 0, header.row_size);
                 page_changed = true;
                 count++;
             }
         }
 
         if (page_changed) {
-            if (RecordManager::isPageEmpty(buf, header.row_size) && header.free_count < 100) {
+            if (RecordManager::isPageEmpty(page_buffer, header.row_size) && header.free_count < 100) {
                 header.free_list[header.free_count++] = p;
                 header_changed = true;
-                std::memset(buf, 0, PAGE_SIZE);
             }
-            pager.write_page(p, buf);
+            pager.write_page(p, page_buffer);
         }
     }
-    if (header_changed) pager.write_page(0, &header);
+
+    if (header_changed) {
+        pager.write_page(0, &header);
+    }
+    
     return count;
 }
 
