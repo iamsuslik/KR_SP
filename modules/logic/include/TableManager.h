@@ -63,13 +63,13 @@ private:
     // Логика работы с B+ деревом
     static Result getRIDFromIndex(Pager& pager, TableHeader& header, const ExpressionNode* cond, RecordID& out_rid);
     
-    static bool executePointQuery(Pager& pager, const TableHeader& header, const ExpressionNode* cond,
-                                 const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                                 const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
+    static bool executePointQuery(Pager& pager, TableHeader& header, const ExpressionNode* cond,
+                             const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                             const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
 
-    static void executeTreeScan(Pager& pager, const TableHeader& header, const ExpressionNode* cond,
-                               const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                               const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
+    static void executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond,
+                           const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                           const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
 };
 
 #endif // TABLE_MANAGER_H

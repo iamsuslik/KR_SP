@@ -226,28 +226,30 @@ void TableManager::applyAggregates(const Row& row, const TableHeader& header,
     }
 }
 
-Result TableManager::executeSelect(const std::string& full_path, const ExpressionNode* cond, 
-                                 const std::vector<std::string>& selectedCols, 
+Result TableManager::executeSelect(const std::string& full_path, const ExpressionNode* cond,
+                                 const std::vector<std::string>& selectedCols,
                                  const std::map<std::string, std::string>& aliases,
                                  const std::vector<AggregateRequest>& aggs) {
     try {
         Pager pager(full_path); TableHeader header; pager.read_page(0, &header);
 
+        // ИСПРАВЛЕНО: ищем любой существующий корень в массиве
         uint32_t first_root = 0;
         for(int i=0; i < MAX_COLUMNS; ++i) {
             if(header.root_page_ids[i] != 0) { first_root = header.root_page_ids[i]; break; }
         }
 
-        if (first_root == 0) { 
+        if (first_root == 0 && pager.get_page_count() < 2) {
             if (!aggs.empty()) renderAggregates(aggs, 0, 0);
             else std::cout << "[]\n";
-            return {true, "Empty"}; 
+            return {true, "Empty"};
         }
 
         bool isAgg = !aggs.empty();
         long long t_sum = 0; int t_count = 0; bool first = true;
         auto colsToPrint = getProjection(header, selectedCols);
 
+        // Передаем header без const_cast, так как мы уберем const из заголовка метода ниже
         if (!executePointQuery(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first)) {
             if (!isAgg) std::cout << "[\n";
             executeTreeScan(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first);
@@ -259,7 +261,7 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
     } catch (const std::exception& e) { return {false, e.what()}; }
 }
 
-void TableManager::executeTreeScan(Pager& pager, const TableHeader& header, const ExpressionNode* cond, 
+void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                                const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
                                const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
 
@@ -281,7 +283,7 @@ void TableManager::executeTreeScan(Pager& pager, const TableHeader& header, cons
     });
 }
 
-bool TableManager::executePointQuery(Pager& pager, const TableHeader& header, const ExpressionNode* cond, 
+bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                                      const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
                                      const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
 
@@ -331,24 +333,6 @@ bool TableManager::executePointQuery(Pager& pager, const TableHeader& header, co
     else renderAggregates(aggs, 0, 0);
     
     return true;
-}
-
-Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header, const ExpressionNode* cond, RecordID& out_rid) {
-    if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) return {false, "No index"};
-
-    for (uint32_t c = 0; c < header.column_count; ++c) {
-        if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-            if (header.columns[c].type == 0) { // INT
-                BP_tree<int> index(pager, header.root_page_ids[c]); // ИСПРАВЛЕНО
-                return index.find(std::stoi(cond->val1), out_rid);
-            } else { // STR
-                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[c]); // ИСПРАВЛЕНО
-                IndexKeyStr key; std::strncpy(key.data, cond->val1.c_str(), 63);
-                return index.find(key, out_rid);
-            }
-        }
-    }
-    return {false, "Not indexed"};
 }
 
 void TableManager::processRow(const Row& row, const TableHeader& header, const ExpressionNode* cond, 
@@ -520,4 +504,27 @@ Result TableManager::dropTable(const std::string& full_path) {
         return {true, "Table file dropped successfully.", {0,0}};
     }
     return {false, "Error: Table not found.", {0,0}};
+}
+
+// Исправленная реализация в TableManager.cpp
+std::vector<uint32_t> TableManager::getProjection(const TableHeader& header, const std::vector<std::string>& selectedCols) {
+    std::vector<uint32_t> projection;
+    
+    // Если пользователь не выбрал колонки (SELECT *), берем все по порядку
+    if (selectedCols.empty()) {
+        for (uint32_t c = 0; c < header.column_count; ++c) {
+            projection.push_back(c);
+        }
+    } else {
+        // Если выбрал конкретные - ищем их индексы в заголовке таблицы
+        for (const auto& sc : selectedCols) {
+            for (uint32_t c = 0; c < header.column_count; ++c) {
+                if (std::string(header.columns[c].name) == sc) { 
+                    projection.push_back(c); 
+                    break; 
+                }
+            }
+        }
+    }
+    return projection;
 }
