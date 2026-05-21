@@ -41,16 +41,25 @@ set(DB_LIB_SOURCES
 )
 add_library(db_logic STATIC ${DB_LIB_SOURCES})
 
+# --- ОПРЕДЕЛЯЕМ ДОПОЛНИТЕЛЬНЫЕ БИБЛИОТЕКИ В ЗАВИСИМОСТИ ОТ КОМПИЛЯТОРА ---
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    # Для MSVC (Visual Studio на Windows) filesystem не требует дополнительных библиотек
+    set(FS_LIB "")
+else()
+    # Для GCC/Clang на Linux/Mac нужна stdc++fs
+    set(FS_LIB "stdc++fs")
+endif()
+
 # --- 4. ОСНОВНАЯ ПРОГРАММА ---
 # main.cpp лежит в той же папке, что и этот CMakeLists.txt
 add_executable(my_db main.cpp)
-target_link_libraries(my_db db_logic stdc++fs)
+target_link_libraries(my_db db_logic ${FS_LIB})
 
 # --- 5. GOOGLE TESTS ---
 enable_testing()
 # Файл тестов лежит в папке tests/ внутри modules/
 add_executable(unit_tests tests/db_tests.cpp)
-target_link_libraries(unit_tests db_logic gtest_main stdc++fs)
+target_link_libraries(unit_tests db_logic gtest_main ${FS_LIB})
 
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
