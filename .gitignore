@@ -16,7 +16,7 @@
 # Linker files
 *.ilk
 
-# Debugger Files
+# Debugger Files 
 *.pdb
 
 # Compiled Dynamic libraries

@@ -62,4 +62,4 @@ add_executable(unit_tests tests/db_tests.cpp)
 target_link_libraries(unit_tests db_logic gtest_main ${FS_LIB})
 
 include(GoogleTest)
-gtest_discover_tests(unit_tests)
+gtest_discover_tests(unit_tests) 
