@@ -1,3 +1,5 @@
+.vscode/
+
 # Prerequisites
 *.d
 
@@ -44,6 +46,7 @@
 data/
 build/
 logs/
+Testing/
 
 # Executable names
 prog
