@@ -1,6 +1,6 @@
-#include "../include/TableManager.h"
-#include "modules/storage/include/BPlusTree.h"
-#include "../include/RecordManager.h"
+#include "TableManager.h"
+#include "BPlusTree.h"
+#include "RecordManager.h"
 #include <iostream>
 #include <cstring>
 #include <regex>

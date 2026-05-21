@@ -8,9 +8,9 @@
 #include <iostream>
 #include <algorithm>
 
-#include "../../shared/include/common.h"
-#include "../../core/include/HierarchyManager.h"
-#include "../../logic/include/TableManager.h"
+#include "common.h"
+#include "HierarchyManager.h"
+#include "TableManager.h"
 
 class SQLParser {
 public:

@@ -1,7 +1,7 @@
 #ifndef RECORD_MANAGER_H
 #define RECORD_MANAGER_H
 
-#include "../../shared/include/common.h"
+#include "common.h"
 
 class RecordManager {
 public:

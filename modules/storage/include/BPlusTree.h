@@ -1,9 +1,9 @@
 #ifndef SYS_PROG_B_PLUS_TREE_H
 #define SYS_PROG_B_PLUS_TREE_H
 
-#include "../../shared/include/common.h"
-#include "../../core/include/Pager.h"
-#include "../../shared/include/comparators.h"
+#include "common.h"
+#include "Pager.h"
+#include "comparators.h"
 #include <vector>
 #include <new>
 #include <iostream>

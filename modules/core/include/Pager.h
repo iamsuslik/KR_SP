@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <filesystem>
-#include "../../shared/include/common.h"
+#include "common.h"
 
 namespace fs = std::filesystem;
 

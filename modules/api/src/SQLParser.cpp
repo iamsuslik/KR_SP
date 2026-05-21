@@ -1,4 +1,4 @@
-#include "../include/SQLParser.h"
+#include "SQLParser.h"
 #include <map>
 #include <stdexcept>
 #include <stack>
