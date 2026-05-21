@@ -143,9 +143,10 @@ void TableManager::updateIndices(Pager& pager, TableHeader& header, const Row& r
 bool TableManager::matches(const Row& row, const TableHeader& header, const ExpressionNode* node) {
     if (!node) return true;
 
+    // Рекурсия для сложных условий (AND/OR)
     if (node->is_op) {
         bool left = matches(row, header, node->left.get());
-        if (node->op == "OR" && left) return true;
+        if (node->op == "OR" && left) return true; 
         if (node->op == "AND" && !left) return false;
 
         bool right = matches(row, header, node->right.get());
@@ -153,12 +154,8 @@ bool TableManager::matches(const Row& row, const TableHeader& header, const Expr
         if (node->op == "OR") return left || right;
     }
 
-    Condition cond;
-    cond.active = true;
-    cond.column = node->column;
-    cond.op = node->op;
-    cond.val1 = node->val1;
-
+    // Если это не оператор, значит это лист (условие). 
+    // Вызываем типизированное сравнение (Уровень 4)
     return evaluateLeaf(row, header, node);
 }
 
@@ -168,60 +165,13 @@ bool TableManager::evaluateLeaf(const Row& row, const TableHeader& header, const
     int colIdx = -1;
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (std::string(header.columns[i].name) == cond->column) { 
-            colIdx = i; 
-            break; 
+            colIdx = i; break; 
         }
     }
-    
     if (colIdx == -1) return false;
 
-    const Value& val = row[colIdx];
-    
-    // Очищаем значения условий от возможных кавычек (для надежности)
-    auto clean = [](std::string s) {
-        if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
-            return s.substr(1, s.size() - 2);
-        return s;
-    };
-
-    std::string v1 = clean(cond->val1);
-    std::string v2 = clean(cond->val2);
-
-    try {
-        if (val.type == DataType::INT) {
-            int v = val.int_val;
-            int t1 = std::stoi(v1);
-
-            if (cond->op == "==" || cond->op == "=") return v == t1;
-            if (cond->op == "!=") return v != t1;
-            if (cond->op == ">")  return v > t1;
-            if (cond->op == "<")  return v < t1;
-            if (cond->op == ">=") return v >= t1;
-            if (cond->op == "<=") return v <= t1;
-            if (cond->op == "BETWEEN") {
-                int t2 = std::stoi(v2);
-                // По ТЗ: интервал [val_2, val_3) - правая граница строго меньше
-                return v >= t1 && v < t2; 
-            }
-        } 
-        else { // СТРОКИ (DataType::STR)
-            std::string v = val.str_val;
-
-            // ТЗ: Лексикографическое сравнение (по алфавиту)
-            if (cond->op == "==" || cond->op == "=") return v == v1;
-            if (cond->op == "!=") return v != v1;
-            if (cond->op == ">")  return v > v1;
-            if (cond->op == "<")  return v < v1;
-            if (cond->op == ">=") return v >= v1;
-            if (cond->op == "<=") return v <= v1;
-            if (cond->op == "LIKE") {
-                return std::regex_match(v, std::regex(v1));
-            }
-        }
-    } catch (...) { 
-        return false; 
-    }
-    return false;
+    // Профессиональное сравнение объектов Value
+    return Value::compare(row[colIdx], cond->val1_parsed, cond->op);
 }
 
 void TableManager::printRowAsJson(const Row& row, const TableHeader& header, 
@@ -382,53 +332,21 @@ bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const Ex
                                      const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
                                      const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first) {
 
-    // 1. Проверяем, что условие подходит для точечного поиска (column = value)
-    if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) {
-        return false;
-    }
+    // 1. Проверка: подходит ли запрос под Point Query?
+    if (!cond || cond->is_op || (cond->op != "==" && cond->op != "=")) return false;
 
-    // 2. Ищем, есть ли индекс на этой колонке
-    int indexedColIdx = -1;
-    for (uint32_t c = 0; c < header.column_count; ++c) {
-        if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-            indexedColIdx = (int)c;
-            break;
-        }
-    }
+    // 2. Ищем индекс
+    int colIdx = findIndexForColumn(header, cond->column);
+    if (colIdx == -1) return false;
 
-    if (indexedColIdx == -1) return false; // Индекса нет, идем в Full Scan
-
-    // 3. Создаем нашего менеджера для работы с деревом
-    TablePageManager pm(pager, header);
-
+    // 3. Выполняем поиск
     RecordID rid;
-    Result search_res = {false, ""};
+    Result res = searchInTree(pager, header, colIdx, cond->val1_parsed, rid);
+
+    // 4. Обработка результата
     bool isAgg = !aggs.empty();
-
-    // Безопасно чистим значение для поиска от кавычек
-    std::string searchVal = cond->val1;
-    if (searchVal.size() >= 2 && searchVal.front() == '"' && searchVal.back() == '"') {
-        searchVal = searchVal.substr(1, searchVal.size() - 2);
-    }
-
-    // 4. Выполняем поиск в зависимости от типа данных
-    try {
-        if (header.columns[indexedColIdx].type == 0) { // INT
-            BP_tree<int> index(pager, header.root_page_ids[indexedColIdx], pm);
-            search_res = index.find(std::stoi(searchVal), rid);
-        } 
-        else { // STR
-            BP_tree<IndexKeyStr> index(pager, header.root_page_ids[indexedColIdx], pm);
-            IndexKeyStr searchKey{};
-            std::strncpy(searchKey.data, searchVal.c_str(), TYPE_STR_SIZE - 1);
-            search_res = index.find(searchKey, rid);
-        }
-    } catch (...) {
-        return false; // Ошибка формата (например, буквы в INT колонке)
-    }
-
-    // 5. Если нашли — извлекаем и выводим
-    if (search_res.success) {
+    if (res.success) {
+        std::cout << "[Optimizer] Point Query found record via index\n";
         alignas(PAGE_SIZE) char buf[PAGE_SIZE];
         pager.read_page(rid.page_id, buf);
         
@@ -437,13 +355,39 @@ bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const Ex
         if (!isAgg) std::cout << "[\n";
         processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
         if (!isAgg) std::cout << "\n]\n";
-        
         return true;
     }
+
+    // Если ничего не нашли
     if (!isAgg) std::cout << "[]\n"; 
     else renderAggregates(aggs, 0, 0);
-    
     return true;
+}
+
+int TableManager::findIndexForColumn(const TableHeader& header, const std::string& colName) {
+    for (uint32_t c = 0; c < header.column_count; ++c) {
+        if (std::string(header.columns[c].name) == colName && header.columns[c].is_indexed) {
+            return (int)c;
+        }
+    }
+    return -1;
+}
+
+Result TableManager::searchInTree(Pager& pager, TableHeader& header, int colIdx, const Value& searchVal, RecordID& out_rid) {
+    TablePageManager pm(pager, header);
+    try {
+        if (header.columns[colIdx].type == 0) { // INT
+            BP_tree<int> index(pager, header.root_page_ids[colIdx], pm);
+            return index.find(searchVal.int_val, out_rid);
+        } else { // STR
+            BP_tree<IndexKeyStr> index(pager, header.root_page_ids[colIdx], pm);
+            IndexKeyStr key{};
+            std::strncpy(key.data, searchVal.str_val.c_str(), TYPE_STR_SIZE - 1);
+            return index.find(key, out_rid);
+        }
+    } catch (...) {
+        return {false, "Index search failed (type mismatch)"};
+    }
 }
 
 void TableManager::processRow(const Row& row, const TableHeader& header, const ExpressionNode* cond, 
@@ -708,13 +652,14 @@ Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header, const Ex
 
     for (uint32_t c = 0; c < header.column_count; ++c) {
         if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
-            if (header.columns[c].type == 0) {
+            // ВМЕСТО stoi используем значение из Value
+            if (header.columns[c].type == 0) { // INT
                 BP_tree<int> index(pager, header.root_page_ids[c], pm);
-                return index.find(std::stoi(cond->val1), out_rid);
-            } else {
+                return index.find(cond->val1_parsed.int_val, out_rid);
+            } else { // STR
                 BP_tree<IndexKeyStr> index(pager, header.root_page_ids[c], pm);
                 IndexKeyStr key{};
-                std::strncpy(key.data, cond->val1.c_str(), TYPE_STR_SIZE - 1);
+                std::strncpy(key.data, cond->val1_parsed.str_val.c_str(), TYPE_STR_SIZE - 1);
                 return index.find(key, out_rid);
             }
         }

@@ -18,6 +18,8 @@ public:
     void process(std::string query, HierarchyManager& hm);
 
 private:
+private:
+    Value parseLiteral(const std::string& token); // Добавь эту строку
     // Вспомогательные методы парсинга
     std::vector<std::string> tokenize(const std::string& query);
     bool isValidCase(const std::string& token);
@@ -37,6 +39,15 @@ private:
     void handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm);
     void handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm);
     void handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm);
+    size_t findValueStartIndex(const std::vector<std::string>& tokens, std::vector<std::string>& outColNames);
+
+    // Сбор всех токенов-значений внутри скобок VALUE (...)
+    std::vector<std::string> collectValuesFromTokens(const std::vector<std::string>& tokens, size_t startIdx);
+
+    // Заполнение Row данными и проверка NOT_NULL / DEFAULT
+    bool prepareAndValidateRow(Row& outRow, const TableHeader& header, 
+                               const std::vector<std::string>& targetCols, 
+                               const std::vector<std::string>& rawValues);
 };
 
 #endif // SQL_PARSER_H

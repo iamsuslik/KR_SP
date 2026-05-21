@@ -7,7 +7,7 @@
 #include <cstring>
 #include <memory>
 
-// 1. Базовые константы
+// --- 1. Базовые константы ---
 constexpr int PAGE_SIZE = 4096;
 const int MAX_COLUMNS = 32;
 const int MAX_FREE_PAGES = 100;
@@ -17,7 +17,7 @@ const int TYPE_INT_SIZE = 4;
 const int ROW_METADATA_SIZE = sizeof(bool) + sizeof(uint16_t);
 const size_t PAGE_INTERNAL_RESERVE = 64;
 
-// 2. Базовые структуры
+// --- 3. Физические структуры (бинарные) ---
 struct RecordID {
     uint32_t page_id;
     uint32_t slot_id;
@@ -28,42 +28,39 @@ constexpr size_t get_optimal_t() {
     return (PAGE_SIZE - PAGE_INTERNAL_RESERVE) / (2 * sizeof(std::pair<T, RecordID>));
 }
 
-#pragma pack(push, 1)
-struct IndexKeyStr {
-    char data[TYPE_STR_SIZE];
-    bool operator<(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) < 0; }
-    bool operator>(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) > 0; }
-    bool operator==(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) == 0; }
-};
-
-struct ColumnSchema {
-    char name[MAX_NAME_LEN];
-    uint8_t type;
-    bool is_indexed;
-    bool is_not_null;
-    bool has_default;
-    char default_val[TYPE_STR_SIZE];
-};
-
-// Расчет размеров для паддинга
-constexpr size_t HEADER_DATA_SIZE = (sizeof(uint32_t) * 4) + (sizeof(uint32_t) * MAX_FREE_PAGES) + (sizeof(uint32_t) * MAX_COLUMNS) + (sizeof(ColumnSchema) * MAX_COLUMNS);
-constexpr size_t HEADER_PADDING_SIZE = PAGE_SIZE - HEADER_DATA_SIZE;
-
-struct TableHeader {
-    uint32_t column_count;
-    uint32_t root_page_id; // Старый корень (для совместимости)
-    uint32_t row_size;
-    uint32_t free_count;
-    uint32_t free_list[MAX_FREE_PAGES];
-    uint32_t root_page_ids[MAX_COLUMNS];
-    ColumnSchema columns[MAX_COLUMNS];
-    char padding[HEADER_PADDING_SIZE];
-};
-static_assert(sizeof(TableHeader) == 4096, "TableHeader must be exactly 4096 bytes");
-#pragma pack(pop)
-
-// 3. Логические типы
+// --- 2. Логические типы (ДОЛЖНЫ БЫТЬ ВЫШЕ ВСЕГО) ---
 enum class DataType { INT, STR };
+
+struct Value {
+    DataType type;
+    int int_val = 0;
+    std::string str_val = "";
+    bool is_null = false;
+
+    Value() : type(DataType::INT), is_null(true) {}
+    explicit Value(int v) : type(DataType::INT), int_val(v), is_null(false) {}
+    explicit Value(std::string v) : type(DataType::STR), str_val(v), is_null(false) {}
+
+    static bool compare(const Value& lhs, const Value& rhs, const std::string& op) {
+        if (lhs.is_null || rhs.is_null) return false;
+        if (lhs.type == DataType::INT) {
+            if (op == "==" || op == "=") return lhs.int_val == rhs.int_val;
+            if (op == "!=") return lhs.int_val != rhs.int_val;
+            if (op == ">")  return lhs.int_val > rhs.int_val;
+            if (op == "<")  return lhs.int_val < rhs.int_val;
+            if (op == ">=") return lhs.int_val >= rhs.int_val;
+            if (op == "<=") return lhs.int_val <= rhs.int_val;
+        } else {
+            if (op == "==" || op == "=") return lhs.str_val == rhs.str_val;
+            if (op == "!=") return lhs.str_val != rhs.str_val;
+            if (op == ">")  return lhs.str_val > rhs.str_val;
+            if (op == "<")  return lhs.str_val < rhs.str_val;
+            if (op == ">=") return lhs.str_val >= rhs.str_val;
+            if (op == "<=") return lhs.str_val <= rhs.str_val;
+        }
+        return false;
+    }
+};
 
 struct ColumnDef {
     std::string name;
@@ -83,38 +80,53 @@ struct TableSchema {
     TableSchema() {}
 };
 
-struct Value {
-    DataType type;
-    int int_val = 0;
-    std::string str_val = "";
-    bool is_null = false;
-    explicit Value(int val) : type(DataType::INT), int_val(val), is_null(false) {}
-    explicit Value(std::string val) : type(DataType::STR), str_val(val), is_null(false) {}
-    Value() : type(DataType::INT), is_null(true) {}
+#pragma pack(push, 1)
+struct IndexKeyStr {
+    char data[TYPE_STR_SIZE];
+    bool operator<(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) < 0; }
+    bool operator>(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) > 0; }
+    bool operator==(const IndexKeyStr& other) const { return std::strncmp(data, other.data, TYPE_STR_SIZE) == 0; }
 };
+
+struct ColumnSchema {
+    char name[MAX_NAME_LEN];
+    uint8_t type;
+    bool is_indexed;
+    bool is_not_null;
+    bool has_default;
+    char default_val[TYPE_STR_SIZE];
+};
+
+constexpr size_t HEADER_DATA_SIZE = (sizeof(uint32_t) * 4) + (sizeof(uint32_t) * MAX_FREE_PAGES) + (sizeof(uint32_t) * MAX_COLUMNS) + (sizeof(ColumnSchema) * MAX_COLUMNS);
+constexpr size_t HEADER_PADDING_SIZE = PAGE_SIZE - HEADER_DATA_SIZE;
+
+struct TableHeader {
+    uint32_t column_count;
+    uint32_t root_page_id; 
+    uint32_t row_size;
+    uint32_t free_count;
+    uint32_t free_list[MAX_FREE_PAGES];
+    uint32_t root_page_ids[MAX_COLUMNS];
+    ColumnSchema columns[MAX_COLUMNS];
+    char padding[HEADER_PADDING_SIZE];
+};
+static_assert(sizeof(TableHeader) == 4096, "TableHeader size must be exactly 4096");
+#pragma pack(pop)
 
 using Row = std::vector<Value>;
 
-// 4. Условия и выражения
-struct Condition {
-    bool active = false;
-    std::string column;
-    std::string op;
-    std::string val1;
-    std::string val2;
-};
-
+// --- 4. Условия и выражения ---
 struct ExpressionNode {
     bool is_op = false;
     std::string op;
     std::string column;
     std::string val1;
-    std::string val2;
+    Value val1_parsed; // Критически важно для Уровня 4
+    Value val2_parsed; 
     std::shared_ptr<ExpressionNode> left;
     std::shared_ptr<ExpressionNode> right;
 };
 
-// 5. Результаты и агрегаты
 struct Result {
     bool success;
     std::string message;
@@ -123,7 +135,6 @@ struct Result {
 };
 
 enum class AggregateType { NONE, COUNT, SUM, AVG };
-
 struct AggregateRequest {
     AggregateType type;
     std::string column;

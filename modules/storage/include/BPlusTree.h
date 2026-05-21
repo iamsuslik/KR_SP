@@ -369,9 +369,7 @@ void BP_tree<tkey, t, compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id)
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id) {
-    alignas(4096) char m_buf[PAGE_SIZE];
-    alignas(4096) char n_buf[PAGE_SIZE];
-    alignas(4096) char p_buf[PAGE_SIZE];
+    alignas(4096) char m_buf[PAGE_SIZE], n_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
 
     _pager.read_page(mid_id, m_buf);
     auto* old_mid = reinterpret_cast<bptree_node_middle*>(m_buf);
@@ -379,19 +377,24 @@ void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id
     uint32_t new_mid_id = allocate_new_page();
     auto* new_mid = new (n_buf) bptree_node_middle();
 
-    tkey up_key = std::move(old_mid->_keys[t-1]);
+    // Ключ, который уходит наверх к родителю
+    tkey up_key = std::move(old_mid->_keys[t - 1]);
 
+    // Копируем ключи и указатели в новый (правый) узел
     size_t j = 0;
+    // Начинаем с t, так как t-1 ушел наверх
     for (size_t i = t; i < old_mid->_count; ++i) {
         new_mid->_keys[j] = std::move(old_mid->_keys[i]);
         new_mid->_pointers[j] = old_mid->_pointers[i];
         j++;
     }
+    // ВАЖНО: не забываем последний указатель!
     new_mid->_pointers[j] = old_mid->_pointers[old_mid->_count];
     
-    new_mid->_count = j;
-    old_mid->_count = t - 1;
+    new_mid->_count = (uint32_t)j;
+    old_mid->_count = (uint32_t)t - 1;
 
+    // Вставляем ключ и новый указатель в родителя
     _pager.read_page(parent_id, p_buf);
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
     

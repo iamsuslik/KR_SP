@@ -1,4 +1,5 @@
 #include "SQLParser.h"
+#include "common.h"
 #include <map>
 #include <stdexcept>
 #include <stack>
@@ -23,6 +24,25 @@ std::string SQLParser::toUpper(std::string s) {
 //     }
 //     return !(hasUpper && hasLower);
 // }
+Value SQLParser::parseLiteral(const std::string& token) {
+    if (token.empty()) return Value();
+    
+    // Если это строка в кавычках (строковый литерал)
+    if (token.front() == '"' && token.back() == '"') {
+        return Value(token.substr(1, token.size() - 2));
+    }
+    
+    // Попытка распарсить как число (целочисленный литерал)
+    try {
+        size_t pos;
+        int val = std::stoi(token, &pos);
+        // Если всё слово — это число
+        if (pos == token.size()) return Value(val);
+    } catch (...) {}
+
+    // Если не число и не в кавычках, считаем это идентификатором или просто строкой
+    return Value(token);
+}
 
 bool SQLParser::isValidIdentifier(const std::string& name) {
     std::regex pattern("^[a-zA-Z_][a-zA-Z0-9_]*$");
@@ -59,6 +79,8 @@ std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(const std::vector
             node->op = op;
             node->column = left->column;
             node->val1 = right->column;
+
+            node->val1_parsed = parseLiteral(right->column); 
         }
         values.push(node);
     };
@@ -205,51 +227,21 @@ void SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hierar
 
 void SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm) {
     if (tokens.size() < 5) return;
-    std::string tableName = tokens[2];
-    auto pathRes = hm.resolveTablePath(tableName);
-    if (!pathRes.success || pathRes.message == "NEW") { std::cout << "[Error] Table not found.\n"; return; }
+    
+    auto res = hm.resolveTablePath(tokens[2]);
+    if (!res.success || res.message == "NEW") { std::cout << "[Error] Table not found.\n"; return; }
 
     TableHeader header;
-    try { Pager p(pathRes.path); p.read_page(0, &header); }
-    catch (...) { std::cout << "[Error] Schema read failed.\n"; return; }
+    Pager(res.path).read_page(0, &header);
 
-    size_t valueTokenStart = 0;
-    std::vector<std::string> targetColNames;
-
-    if (tokens[3] == "(") {
-        size_t i = 4;
-        while (i < tokens.size() && tokens[i] != ")") { if (tokens[i] != ",") targetColNames.push_back(tokens[i]); i++; }
-        for (size_t j = i; j < tokens.size(); ++j) { if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; } }
-    } else {
-        for (size_t j = 3; j < tokens.size(); ++j) { if (toUpper(tokens[j]) == "VALUE") { valueTokenStart = j + 2; break; } }
-    }
-
-    if (valueTokenStart == 0) { std::cout << "[Error] Syntax error: VALUE expected\n"; return; }
-
-    std::vector<std::string> values;
-    for (size_t vIdx = valueTokenStart; vIdx < tokens.size() && tokens[vIdx] != ")"; ++vIdx) {
-        if (tokens[vIdx] != ",") values.push_back(tokens[vIdx]);
-    }
+    std::vector<std::string> targetCols;
+    size_t valStart = findValueStartIndex(tokens, targetCols);
+    auto rawValues = collectValuesFromTokens(tokens, valStart);
 
     Row finalRow(header.column_count, Value());
-    try {
-        if (!targetColNames.empty()) {
-            for (size_t i = 0; i < targetColNames.size() && i < values.size(); ++i) {
-                int cIdx = -1;
-                for (uint32_t c = 0; c < header.column_count; ++c) if (header.columns[c].name == targetColNames[i]) { cIdx = c; break; }
-                if (cIdx != -1) {
-                    if (header.columns[cIdx].type == 0) finalRow[cIdx] = Value(std::stoi(values[i]));
-                    else { std::string s = values[i]; if (s.front() == '"') s = s.substr(1, s.size()-2); finalRow[cIdx] = Value(s); }
-                }
-            }
-        } else {
-            for (uint32_t i = 0; i < header.column_count; ++i) {
-                if (header.columns[i].type == 0) finalRow[i] = Value(std::stoi(values[i]));
-                else { std::string s = values[i]; if (s.front() == '"') s = s.substr(1, s.size()-2); finalRow[i] = Value(s); }
-            }
-        }
-        std::cout << TableManager::insertRow(pathRes.path, finalRow).message << "\n";
-    } catch (...) { std::cout << "[Error] Invalid value format in INSERT.\n"; }
+    if (prepareAndValidateRow(finalRow, header, targetCols, rawValues)) {
+        std::cout << TableManager::insertRow(res.path, finalRow).message << "\n";
+    }
 }
 
 void SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm) {
@@ -311,4 +303,66 @@ void SQLParser::handleUpdate(const std::vector<std::string>& tokens, HierarchyMa
         auto tree = buildExpressionTree(whereTokens);
         std::cout << TableManager::executeUpdate(res.path, tree.get(), tokens[3], tokens[5]).message << "\n";
     } else std::cout << "[Error] Table not found.\n";
+}
+
+size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, std::vector<std::string>& outColNames) {
+    size_t i = 3;
+    // Случай INSERT INTO table (c1, c2) ...
+    if (i < tokens.size() && tokens[i] == "(") {
+        i++; // Пропускаем (
+        while (i < tokens.size() && tokens[i] != ")") {
+            if (tokens[i] != ",") outColNames.push_back(tokens[i]);
+            i++;
+        }
+        i++; // Пропускаем )
+    }
+    // Ищем слово VALUE
+    while (i < tokens.size() && toUpper(tokens[i]) != "VALUE") i++;
+    
+    return (i + 2 < tokens.size()) ? i + 2 : 0; // Возвращаем индекс ПЕРВОГО значения после '('
+}
+
+std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<std::string>& tokens, size_t startIdx) {
+    std::vector<std::string> values;
+    if (startIdx == 0) return values;
+    for (size_t i = startIdx; i < tokens.size() && tokens[i] != ")"; ++i) {
+        if (tokens[i] != ",") values.push_back(tokens[i]);
+    }
+    return values;
+}
+
+bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header, 
+                                     const std::vector<std::string>& targetCols, 
+                                     const std::vector<std::string>& rawValues) {
+    // 1. Проверка количества (если колонки не указаны явно)
+    if (targetCols.empty() && rawValues.size() != header.column_count) {
+        std::cout << "[Error] Column count mismatch. Expected " << header.column_count << ".\n";
+        return false;
+    }
+
+    // 2. Наполнение Row (с использованием нашего parseLiteral)
+    if (!targetCols.empty()) {
+        for (size_t i = 0; i < targetCols.size() && i < rawValues.size(); ++i) {
+            int cIdx = -1;
+            for (uint32_t c = 0; c < header.column_count; ++c) {
+                if (header.columns[c].name == targetCols[i]) { cIdx = c; break; }
+            }
+            if (cIdx != -1) outRow[cIdx] = parseLiteral(rawValues[i]);
+        }
+    } else {
+        for (size_t i = 0; i < rawValues.size(); ++i) outRow[i] = parseLiteral(rawValues[i]);
+    }
+
+    // 3. Проверка NOT_NULL и применение DEFAULT
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        if (outRow[i].is_null) {
+            if (header.columns[i].has_default) {
+                outRow[i] = parseLiteral(header.columns[i].default_val);
+            } else if (header.columns[i].is_not_null) {
+                std::cout << "[Error] Column '" << header.columns[i].name << "' is NOT_NULL.\n";
+                return false;
+            }
+        }
+    }
+    return true;
 }

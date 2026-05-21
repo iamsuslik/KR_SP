@@ -16,6 +16,9 @@ public:
                                const std::vector<std::string>& selectedCols = {},
                                const std::map<std::string, std::string>& aliases = {},
                                const std::vector<AggregateRequest>& aggs = {});
+    static bool executePointQuery(Pager& pager, TableHeader& header, const ExpressionNode* cond,
+                             const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
+                             const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
 
     static Result createTable(const std::string& full_path, const TableSchema& schema);
 
@@ -63,10 +66,6 @@ private:
     // Логика работы с B+ деревом
     static Result getRIDFromIndex(Pager& pager, TableHeader& header, const ExpressionNode* cond, RecordID& out_rid);
     
-    static bool executePointQuery(Pager& pager, TableHeader& header, const ExpressionNode* cond,
-                             const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                             const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first);
-
     static void executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                                const std::vector<uint32_t>& colsToPrint, 
                                const std::map<std::string, std::string>& aliases,
@@ -76,10 +75,16 @@ private:
     static int fullScanUpdate(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                               const std::string& targetCol, const std::string& newVal);
     static void clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row);
+    static int findIndexForColumn(const TableHeader& header, const std::string& colName);
+
+    // Выполняет физический поиск в B+ дереве в зависимости от типа данных
+    static Result searchInTree(Pager& pager, TableHeader& header, int colIdx, const Value& searchVal, RecordID& out_rid);
+
+    // Метод для чистого Full Scan (перебора страниц) при выборке
     static void fullScanSelect(Pager& pager, TableHeader& header, const ExpressionNode* cond,
-                           const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint,
-                           const std::map<std::string, std::string>& aliases,
-                           long long& t_sum, int& t_count, bool& first, bool isAgg);
+                               const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint,
+                               const std::map<std::string, std::string>& aliases,
+                               long long& t_sum, int& t_count, bool& first, bool isAgg);
 };
 
 #endif // TABLE_MANAGER_H
