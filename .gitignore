@@ -1,5 +1,3 @@
-.vscode/
-
 # Prerequisites
 *.d
 
@@ -52,5 +50,11 @@ Testing/
 prog
 my_db
 my_db_app
+unit_tests 
 
 # IDE folders
+.vscode/
+.idea/
+cmake-build-debug/
+bin/
+obj/
