@@ -76,6 +76,10 @@ private:
     static int fullScanUpdate(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
                               const std::string& targetCol, const std::string& newVal);
     static void clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row);
+    static void fullScanSelect(Pager& pager, TableHeader& header, const ExpressionNode* cond,
+                           const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint,
+                           const std::map<std::string, std::string>& aliases,
+                           long long& t_sum, int& t_count, bool& first, bool isAgg);
 };
 
 #endif // TABLE_MANAGER_H

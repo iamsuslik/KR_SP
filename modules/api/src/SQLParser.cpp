@@ -14,15 +14,15 @@ std::string SQLParser::toUpper(std::string s) {
     return s;
 }
 
-bool SQLParser::isValidCase(const std::string& token) {
-    if (token.empty() || token[0] == '"') return true;
-    bool hasUpper = false, hasLower = false;
-    for (char c : token) {
-        if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
-        if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
-    }
-    return !(hasUpper && hasLower);
-}
+// bool SQLParser::isValidCase(const std::string& token) {
+//     if (token.empty() || token[0] == '"') return true;
+//     bool hasUpper = false, hasLower = false;
+//     for (char c : token) {
+//         if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
+//         if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
+//     }
+//     return !(hasUpper && hasLower);
+// }
 
 bool SQLParser::isValidIdentifier(const std::string& name) {
     std::regex pattern("^[a-zA-Z_][a-zA-Z0-9_]*$");
@@ -124,7 +124,8 @@ void SQLParser::process(std::string query, HierarchyManager& hm) {
     if (tokens[0].front() == '[') return;
 
     for (const auto& t : tokens) {
-        if (t.front() != '"' && !isValidCase(t)) {
+        // if (t.front() != '"' && !isValidCase(t)) {
+        if (t.front() != '"') {
             std::cout << "[Error] Mixed case in word '" << t << "' is forbidden.\n";
             return;
         }

@@ -73,40 +73,47 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
 }
 
 RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
-    // 1. Сначала всегда берем из Free List (это самый быстрый и правильный путь)
+    // 1. ПЕРВООЧЕРЕДНО: берем из Free List (полностью пустые страницы)
     if (header.free_count > 0) {
         uint32_t reused_p = header.free_list[--header.free_count];
+        
+        // Отладочное сообщение
+        std::cout << "[Debug] Reusing page " << reused_p << " from FreeList\n";
+        
         char clean_page[PAGE_SIZE] = {0};
-        pager.write_page(reused_p, clean_page);
+        pager.write_page(reused_p, clean_page); // Гарантируем чистоту
         return {reused_p, 0};
     }
 
-    // 2. Если Free List пуст, ищем пустые слоты в существующих страницах
+    // 2. ВТОРОЙ ШАГ: Ищем свободный слот в существующих страницах данных
     int slots_per_page = PAGE_SIZE / header.row_size;
     char page_buffer[PAGE_SIZE];
 
     for (uint32_t p_id = 1; p_id < pager.get_page_count(); ++p_id) {
-        // Пропускаем страницы, которые являются корнями индексов
-        bool protected_page = false;
-        for(int i=0; i<MAX_COLUMNS; ++i) {
-            if(header.root_page_ids[i] == p_id) { protected_page = true; break; }
+        // Проверяем, не занята ли эта страница корнем какого-либо индекса
+        bool is_protected = false;
+        for (int i = 0; i < MAX_COLUMNS; ++i) {
+            if (header.root_page_ids[i] == p_id) { is_protected = true; break; }
         }
-        // ВАЖНО: Пропускаем страницы, которые уже есть в free_list (защита от двойного выделения)
-        for(uint32_t i=0; i < header.free_count; ++i) {
-            if(header.free_list[i] == p_id) { protected_page = true; break; }
+        
+        // Также защищаем страницы, которые УЖЕ лежат в Free List, чтобы сканер их не трогал
+        for (uint32_t i = 0; i < header.free_count; ++i) {
+            if (header.free_list[i] == p_id) { is_protected = true; break; }
         }
 
-        if(protected_page) continue;
+        if (is_protected) continue;
 
         pager.read_page(p_id, page_buffer);
         for (int i = 0; i < slots_per_page; ++i) {
             bool occupied;
             std::memcpy(&occupied, page_buffer + (i * header.row_size), sizeof(bool));
-            if (!occupied) return {p_id, (uint32_t)i};
+            if (!occupied) {
+                return {p_id, (uint32_t)i}; // Нашли свободный слот внутри страницы
+            }
         }
     }
 
-    // 3. Если места нет совсем — выделяем новую страницу в конце файла
+    // 3. ТРЕТИЙ ШАГ: Если всё забито — выделяем новую страницу в конце файла
     return {pager.allocate_page(), 0};
 }
 
@@ -301,22 +308,71 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
 }
 
 void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const ExpressionNode* cond, 
-                                   const std::vector<uint32_t>& colsToPrint, const std::map<std::string, std::string>& aliases,
-                                   const std::vector<AggregateRequest>& aggs, long long& t_sum, int& t_count, bool& first, bool isAgg) {
+                                   const std::vector<uint32_t>& colsToPrint, 
+                                   const std::map<std::string, std::string>& aliases,
+                                   const std::vector<AggregateRequest>& aggs, 
+                                   long long& t_sum, int& t_count, bool& first, bool isAgg) {
 
+    // 1. Ищем подходящий индекс
+    int colIdx = -1;
+    if (cond && !cond->is_op) {
+        for (uint32_t c = 0; c < header.column_count; ++c) {
+            if (std::string(header.columns[c].name) == cond->column && header.columns[c].is_indexed) {
+                colIdx = (int)c;
+                break;
+            }
+        }
+    }
+
+    // 2. Если индекс есть — идем по нему
+    if (colIdx != -1 && header.root_page_ids[colIdx] != 0) {
+        std::cout << "[Optimizer] Using Index Scan on '" << header.columns[colIdx].name << "'\n";
+        TablePageManager pm(pager, header);
+        
+        if (header.columns[colIdx].type == 0) { // INT
+            BP_tree<int> tree(pager, header.root_page_ids[colIdx], pm);
+            tree.for_each([&](const RecordID& rid) {
+                char buf[PAGE_SIZE];
+                pager.read_page(rid.page_id, buf);
+                Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
+                processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
+            });
+        } else { // STR
+            BP_tree<IndexKeyStr> tree(pager, header.root_page_ids[colIdx], pm);
+            tree.for_each([&](const RecordID& rid) {
+                char buf[PAGE_SIZE];
+                pager.read_page(rid.page_id, buf);
+                Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
+                processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
+            });
+        }
+    } 
+    // 3. Если индекса нет — вызываем наш новый метод Full Scan
+    else {
+        fullScanSelect(pager, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
+    }
+}
+
+void TableManager::fullScanSelect(Pager& pager, TableHeader& header, const ExpressionNode* cond,
+                                 const std::vector<AggregateRequest>& aggs, const std::vector<uint32_t>& colsToPrint,
+                                 const std::map<std::string, std::string>& aliases,
+                                 long long& t_sum, int& t_count, bool& first, bool isAgg) {
+    
+    std::cout << "[Info] Performing Full Table Scan...\n";
     char page_buffer[PAGE_SIZE];
     int slots_per_page = PAGE_SIZE / header.row_size;
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         pager.read_page(p, page_buffer);
-
         for (int i = 0; i < slots_per_page; ++i) {
             char* slot_ptr = page_buffer + (i * header.row_size);
-            bool occupied; 
+            bool occupied;
             std::memcpy(&occupied, slot_ptr, sizeof(bool));
-            if (!occupied) continue; 
+            if (!occupied) continue;
+
             Row row = RecordManager::extractRow(slot_ptr, header);
-            if (row.size() >= 2 && row[0].is_null && row[1].is_null) continue;
+            if (row.empty()) continue;
+
             processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg);
         }
     }
@@ -543,14 +599,14 @@ void TableManager::updateFieldAndIndex(Row& row, uint32_t colIdx, const std::str
 }
 
 void TableManager::clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row) {
-    TablePageManager pm(pager, header); // Добавили
+    TablePageManager pm(pager, header); // СОЗДАЕМ МЕНЕДЖЕРА
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
             if (header.columns[i].type == 0) {
-                BP_tree<int> index(pager, header.root_page_ids[i], pm); // Передали pm
+                BP_tree<int> index(pager, header.root_page_ids[i], pm); // ПЕРЕДАЕМ pm
                 index.erase(row[i].int_val);
             } else {
-                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm); // Передали pm
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm);
                 IndexKeyStr key{};
                 std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
                 index.erase(key);
@@ -564,39 +620,47 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
         Pager pager(full_path);
         TableHeader header;
         pager.read_page(0, &header);
+        
         RecordID rid;
-
-        // 1. Попытка оптимизации (через индекс)
+        // 1. Попытка удаления через индекс (Optimized)
         if (getRIDFromIndex(pager, header, cond, rid).success) {
             char buf[PAGE_SIZE];
             pager.read_page(rid.page_id, buf);
             char* slot_ptr = buf + (rid.slot_id * header.row_size);
             
-            // Используем чистильщика
+            // Сначала чистим индексы для этой строки
             clearIndicesForRow(pager, header, RecordManager::extractRow(slot_ptr, header));
             
-            bool status = false;
-            std::memcpy(slot_ptr, &status, 1);
+            // Помечаем слот как свободный
+            std::memset(slot_ptr, 0, header.row_size);
             
-            if (RecordManager::isPageEmpty(buf, header.row_size)) {
+            // Если страница стала совсем пустой — отдаем в Free List
+            if (RecordManager::isPageEmpty(buf, header.row_size) && header.free_count < MAX_FREE_PAGES) {
                 header.free_list[header.free_count++] = rid.page_id;
+                std::memset(buf, 0, PAGE_SIZE); // Полная очистка
             }
+            
             pager.write_page(rid.page_id, buf);
-            pager.write_page(0, &header);
+            pager.write_page(0, &header); // Сохраняем заголовок
             return {true, "Successfully deleted 1 row (Optimized)"};
         }
 
-        // 2. Если индекса нет — вызываем вспомогательный метод полного скана
+        // 2. Если индекса нет — Full Scan
         int count = fullScanDelete(pager, header, cond);
+        // Сохраняем заголовок (там могли измениться Free List или корни деревьев)
+        pager.write_page(0, &header); 
+        
         return {true, "Successfully deleted " + std::to_string(count) + " rows (Full Scan)"};
 
-    } catch (const std::exception& e) { return {false, e.what()}; }
+    } catch (const std::exception& e) { 
+        return {false, std::string("Delete Error: ") + e.what()}; 
+    }
 }
 
 int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ExpressionNode* cond) {
     int count = 0;
     char page_buffer[PAGE_SIZE];
-    bool header_changed = false;
+    bool header_changed = false; // ВЕРНУЛИ ЕЁ
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         pager.read_page(p, page_buffer);
@@ -605,14 +669,11 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const Expres
         int slots = PAGE_SIZE / header.row_size;
         for (int i = 0; i < slots; ++i) {
             char* slot_ptr = page_buffer + (i * header.row_size);
-            
             bool occupied; 
             std::memcpy(&occupied, slot_ptr, sizeof(bool));
-            
             if (!occupied) continue;
 
             Row row = RecordManager::extractRow(slot_ptr, header);
-
             if (matches(row, header, cond)) {
                 clearIndicesForRow(pager, header, row); 
                 std::memset(slot_ptr, 0, header.row_size);
@@ -622,14 +683,16 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const Expres
         }
 
         if (page_changed) {
-            if (RecordManager::isPageEmpty(page_buffer, header.row_size) && header.free_count < 100) {
+            if (RecordManager::isPageEmpty(page_buffer, header.row_size) && header.free_count < MAX_FREE_PAGES) {
                 header.free_list[header.free_count++] = p;
-                header_changed = true;
+                std::memset(page_buffer, 0, PAGE_SIZE); 
+                header_changed = true; // ТЕПЕРЬ ОНА ИСПОЛЬЗУЕТСЯ
             }
             pager.write_page(p, page_buffer);
         }
     }
 
+    // ВАЖНО: сохраняем заголовок, если изменился список свободных страниц
     if (header_changed) {
         pager.write_page(0, &header);
     }
