@@ -107,7 +107,11 @@ void AsyncManager::process_and_finalize(AsyncTask& task, const std::string& quer
 void AsyncManager::update_registry(const std::string& guid, std::string buf, StatusCode sc) {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     char t_buf[26];
-    ctime_r(&now, t_buf);
+    #ifdef _WIN32
+        ctime_s(t_buf, sizeof(t_buf), &now);
+    #else
+        ctime_r(&now, t_buf);
+    #endif
     std::string timestamp(t_buf);
     if (!timestamp.empty()) timestamp.pop_back(); // Убираем \n от ctime
 

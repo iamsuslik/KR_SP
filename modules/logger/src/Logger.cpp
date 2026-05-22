@@ -26,7 +26,11 @@ void Logger::log(const std::string& query, const std::string& status, long long 
         // Потокобезопасное получение времени
         auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         struct tm time_struct;
-        localtime_r(&now, &time_struct);
+        #ifdef _WIN32
+            localtime_s(&time_struct, &now);
+        #else
+            localtime_r(&now, &time_struct);
+        #endif
 
         char time_str[20];
         std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &time_struct);

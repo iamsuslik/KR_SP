@@ -28,7 +28,7 @@ std::string SQLParser::toUpper(std::string s) {
 //     return !(hasUpper && hasLower);
 // }
 
-Value SQLParser::parseLiteral(const std::string& token) {
+Value SQLParser::parseLiteral(const std::string& token) const{
     if (token.empty()) return Value();
     
     // Если это строка в кавычках
@@ -480,7 +480,7 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
                                  std::vector<std::string>& selectedCols, 
                                  std::vector<AggregateRequest>& aggs, 
                                  std::map<std::string, std::string>& aliases) {
-    if (fromIdx == 1 && tokens[1] == "*") return Result::Success();
+    if (fromIdx == 2 && tokens[1] == "*") return Result::Success();
 
     for (size_t i = 1; i < fromIdx; ++i) {
         std::string token = toUpper(tokens[i]);

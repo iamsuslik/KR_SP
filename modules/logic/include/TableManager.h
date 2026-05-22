@@ -4,6 +4,7 @@
 #include "common.h"
 #include "Pager.h"
 #include "RecordManager.h"
+#include "TablePageManager.h"
 #include <vector>
 #include <string>
 #include <map>

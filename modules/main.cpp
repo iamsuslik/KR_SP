@@ -11,8 +11,6 @@
 #include "Logger.h"
 #include "TableLockManager.h" // ОБЯЗАТЕЛЬНО
 
-// Инстанцируем глобальный менеджер блокировок для локального режима
-TableLockManager g_lock_manager;
 
 /**
  * Основной цикл выполнения команд

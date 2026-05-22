@@ -7,6 +7,7 @@
 #include "common.h"
 #include "HierarchyManager.h"
 #include "TableManager.h"
+#include <stack>
 
 class SQLParser {
 public:
@@ -31,7 +32,7 @@ private:
     std::shared_ptr<ExpressionNode> createLeaf(const std::string& token);
     // Все обработчики теперь тоже принимают колбэк
     Result handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
     Result handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
     Result handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
     Result handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
@@ -39,7 +40,7 @@ private:
     Result handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
 
     // Вспомогательные методы (остаются без изменений)
-    Value parseLiteral(const std::string& token);
+    Value parseLiteral(const std::string& token) const;
     std::vector<std::string> tokenize(const std::string& query) const;
     static std::string toUpper(std::string s);
     bool isValidIdentifier(const std::string& name);

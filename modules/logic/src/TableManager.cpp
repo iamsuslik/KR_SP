@@ -155,6 +155,10 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
     // 3. ТРЕТИЙ ШАГ: Если всё забито — выделяем новую страницу в конце файла
     try {
         uint32_t new_p = pager.allocate_page();
+        alignas(PAGE_SIZE) char clean_page[PAGE_SIZE] = {0};
+        if (pager.write_page(new_p, clean_page).isOk()) {
+            return {new_p, 0};
+        }
         return {new_p, 0};
     } catch (...) {
         return {0, 0}; // Сигнал ошибки, если место на диске кончилось
@@ -380,7 +384,7 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const Expr
     // 2. Если индекс найден — используем Index Scan (обход листьев дерева)
     if (colIdx != -1 && header.root_page_ids[colIdx] != 0) {
         // Вместо прямого std::cout отправляем инфо-сообщение в callback (Грех №1)
-        callback("[Optimizer] Using Index Scan on '" + std::string(header.columns[colIdx].name) + "'\n");
+        std::cerr << "[Optimizer] Using Index Scan on '" << header.columns[colIdx].name << "'" << std::endl;
         
         TablePageManager pm(pager, header);
         
@@ -419,8 +423,7 @@ void TableManager::fullScanSelect(Pager& pager, TableHeader& header, const Expre
                                  long long& t_sum, int& t_count, bool& first, bool isAgg,
                                  OutputCallback callback) { 
     
-    // Вместо std::cout отправляем системное сообщение в колбэк
-    callback("[Info] Performing Full Table Scan...\n");
+    std::cerr << "[Info] Performing Full Table Scan..." << std::endl;
 
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
     int slots_per_page = PAGE_SIZE / header.row_size;
@@ -474,7 +477,7 @@ bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const Ex
     // 4. Если запись найдена по индексу
     if (res.isOk()) {
         // Сообщаем об успехе оптимизатора в callback 
-        callback("[Optimizer] Point Query found record via index\n");
+        std::cerr << "[Optimizer] Point Query found record via index" << std::endl;
         
         alignas(PAGE_SIZE) char buf[PAGE_SIZE];
         // ПРОВЕРКА ЧТЕНИЯ СТРАНИЦЫ 
