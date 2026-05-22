@@ -36,6 +36,7 @@ set(DB_LIB_SOURCES
     logic/src/RecordManager.cpp
     logger/src/Logger.cpp
     shared/src/ErrorUtils.cpp
+    logger/src/TelemetryManager.cpp
 )
 add_library(db_logic STATIC ${DB_LIB_SOURCES})
 
@@ -58,3 +59,11 @@ target_link_libraries(unit_tests db_logic gtest_main ${FS_LIB})
 
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
+
+# --- СЕРВЕР ---
+add_executable(db_server modules/api/src/ServerApp.cpp)
+target_link_libraries(db_server db_logic ${FS_LIB})
+
+# --- КЛИЕНТ ---
+add_executable(db_client modules/api/src/ClientApp.cpp)
+target_link_libraries(db_client db_logic ${FS_LIB})

@@ -151,7 +151,7 @@ enum class StatusCode {
     INTERNAL_ERROR
 };
 
-struct Result {
+struct [[nodiscard]] Result {
     StatusCode code;
     std::string details; // Дополнительная информация (например, имя проблемной колонки)
     RecordID rid = {0, 0};
