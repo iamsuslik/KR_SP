@@ -90,6 +90,7 @@ private:
                                const std::map<std::string, std::string>& aliases,
                                long long& t_sum, int& t_count, bool& first, bool isAgg, 
                                OutputCallback callback);
+    static Result checkUniqueConstraints(Pager& pager, TableHeader& header, const Row& row, TablePageManager& pm);
 };
 
 #endif // TABLE_MANAGER_H

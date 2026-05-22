@@ -4,6 +4,7 @@
 #include "TelemetryManager.h"
 #include "AsyncManager.h"
 #include "Logger.h"
+#include "TableLockManager.h"
 
 #include <iostream>
 #include <vector>
@@ -19,7 +20,7 @@
 #include <errno.h>
 #include <atomic>
 #include <thread>
-
+TableLockManager g_lock_manager;
 // Константы конфигурации
 static constexpr int POLL_TIMEOUT_MS = 1000;
 static constexpr const char* CMD_CHECK = "CHECK ";
