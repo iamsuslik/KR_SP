@@ -18,7 +18,7 @@ public:
 
     std::string getCurrentDB() const;
 
-    Result resolveTablePath(const std::string& input_name);
+    Result resolveTablePath(const std::string& input_name) const;
 };
 
 #endif // HIERARCHY_MANAGER_H

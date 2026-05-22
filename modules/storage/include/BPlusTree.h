@@ -185,7 +185,7 @@ requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const 
 {
     if (_root_id == 0) {
-        return {false, "search error: b+-tree is empty", {0, 0}};
+        return Result::Error(StatusCode::NOT_FOUND, "search error: b+-tree is empty");
     }
 
     uint32_t curr_id = _root_id;
@@ -206,10 +206,10 @@ Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const
 
     if (idx > 0 && equal(key, leaf->_data[idx - 1].first)) {
         out_rid = leaf->_data[idx - 1].second;
-        return {true, "OK", out_rid};
+        return Result::Success(out_rid);
     }
 
-    return {false, "search error: key not found", {0, 0}};
+    return Result::Error(StatusCode::NOT_FOUND, "search error: key not found");
 }
 
 template <typename tkey, std::size_t t, typename compare>
@@ -218,7 +218,7 @@ bool BP_tree<tkey, t, compare>::contains(const tkey& key) const
 {
     RecordID dummy_rid;
     Result res = find(key, dummy_rid);
-    return res.success;
+    return res.isOk();
 }
 
 template <typename tkey, std::size_t t, typename compare>
@@ -226,7 +226,7 @@ requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid) const 
 {
     if (_root_id == 0) {
-        return {false, "lower_bound error: b+-tree is empty", {0, 0}};
+        return Result::Error(StatusCode::NOT_FOUND, "lower_bound error: b+-tree is empty");
     }
 
     uint32_t curr_id = _root_id;
@@ -248,11 +248,11 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
 
     if (l > 0 && equal(key, leaf->_data[l-1].first)) {
         out_rid = leaf->_data[l-1].second;
-        return {true, "found exact match", out_rid};
+        return Result::Success(out_rid);
     } 
     else if (l < leaf->_count) {
         out_rid = leaf->_data[l].second;
-        return {true, "found next greater element in same leaf", out_rid};
+        return Result::Success(out_rid);
     } 
     else if (leaf->_next != 0) {
         uint32_t next_leaf_id = leaf->_next;
@@ -261,10 +261,10 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
         
         if (next_leaf->_count > 0) {
             out_rid = next_leaf->_data[0].second;
-            return {true, "found in next leaf", out_rid};
+            return Result::Success(out_rid);
         }
     }
-    return {false, "lower_bound: no elements >= key found", {0, 0}};
+    return Result::Error(StatusCode::NOT_FOUND, "lower_bound: no elements >= key found");
 }
 
 template <typename tkey, std::size_t t, typename compare>
@@ -272,7 +272,7 @@ requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid) const 
 {
     if (_root_id == 0) {
-        return {false, "upper_bound error: b+-tree is empty", {0, 0}};
+        return Result::Error(StatusCode::NOT_FOUND, "upper_bound error: b+-tree is empty");
     }
 
     uint32_t curr_id = _root_id;
@@ -295,18 +295,18 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
     }
     if (l < leaf->_count) {
         out_rid = leaf->_data[l].second;
-        return {true, "found strictly greater element", out_rid};
+        return Result::Success(out_rid);
     } 
     else if (leaf->_next != 0) {
         _pager.read_page(leaf->_next, buffer);
         auto* next_leaf = reinterpret_cast<const bptree_node_term*>(buffer);
         if (next_leaf->_count > 0) {
             out_rid = next_leaf->_data[0].second;
-            return {true, "found in next leaf", out_rid};
+            return Result::Success(out_rid);
         }
     }
 
-    return {false, "upper_bound: no element strictly greater than key", {0, 0}};
+    return Result::Error(StatusCode::NOT_FOUND, "upper_bound: no element strictly greater than key");
 }
 
 
@@ -458,7 +458,7 @@ template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     if (contains(key)) {
-        return {false, "Error: Duplicate key", {0,0}};
+        return Result::Error(StatusCode::DUPLICATE_KEY, "Duplicate key");
     }
 
     if (_root_id == 0) {
@@ -476,7 +476,7 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
 
         _root_id = new_root_id;
 
-        return {true, "First root created successfully", rid};
+        return Result::Success(rid);
     }
 
     std::vector<uint32_t> path;
@@ -501,20 +501,20 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
 
     balance_insert(leaf_id, path);
 
-    return {true, "Success", rid};
+    return Result::Success(rid);
 }
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::erase(const tkey& key_del) 
 {
-    if (_root_id == 0) return {false, "Tree empty", {0,0}};
+    if (_root_id == 0) return Result::Error(StatusCode::NOT_FOUND, "Tree empty");
 
     RecordID next_rid;
     tkey next_key;
     bool has_next = false;
     Result next_res = upper_bound(key_del, next_rid);
-    if (next_res.success) {
+    if (next_res.isOk()) {
         alignas(4096) char tmp_buf[PAGE_SIZE];
         _pager.read_page(next_rid.page_id, tmp_buf);
         auto* next_leaf = reinterpret_cast<bptree_node_term*>(tmp_buf);
@@ -531,7 +531,7 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
     size_t actual_idx = binary_search_in_node(leaf, key_del);
 
     if (actual_idx == 0 || !equal(leaf->_data[actual_idx - 1].first, key_del)) {
-        return {false, "Key not found", {0,0}};
+        return Result::Error(StatusCode::NOT_FOUND, "Key not found");
     }
     size_t del_pos = actual_idx - 1;
 
@@ -551,7 +551,7 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
         return find(next_key, out_rid);
     }
     
-    return {true, "Deleted, no next element", {0,0}};
+    return Result::Success();
 }
 
 template <typename tkey, std::size_t t, typename compare>
@@ -567,21 +567,26 @@ void BP_tree<tkey, t, compare>::shrink_root()
 {
     if (_root_id == 0) return;
 
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+    
+    // ПРОВЕРКА I/O (хорошо бы добавить, но можно оставить так для void)
     _pager.read_page(_root_id, buffer);
     auto* root_base = reinterpret_cast<bptree_node_base*>(buffer);
 
+    // Если корень - это лист, дерево не может больше сжиматься
     if (root_base->_is_terminate) return;
 
+    // Если в корневом узле не осталось ключей (все данные ушли в потомков после удаления)
     if (root_base->_count == 0) {
         auto* mid_root = reinterpret_cast<bptree_node_middle*>(buffer);
         uint32_t old_root_id = _root_id;
+        
+        // Новым корнем становится единственный оставшийся потомок
         uint32_t new_root_id = mid_root->_pointers[0];
         
         _root_id = new_root_id;
+
         release_page(old_root_id); 
-        
-        std::cout << "[FreeList] Root page " << old_root_id << " released to list.\n";
     }
 }
 
@@ -777,7 +782,6 @@ void BP_tree<tkey, t, compare>::merge_sibling(uint32_t curr_id, uint32_t parent_
     _pager.write_page(parent_id, p_buf);
 
     release_page(r_id); 
-    std::cout << "[FreeList] Page " << r_id << " merged and released.\n";
 }
 
 template <typename tkey, std::size_t t, typename compare>
