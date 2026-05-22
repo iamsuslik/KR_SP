@@ -370,12 +370,8 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const Expr
 
     // 2. Если индекс найден — используем Index Scan
     if (colIdx != -1 && header.root_page_ids[colIdx] != 0) {
-<<<<<<< HEAD
         // Вместо прямого std::cout отправляем инфо-сообщение в callback (Грех №1)
         std::cerr << "[Optimizer] Using Index Scan on '" << header.columns[colIdx].name << "'" << std::endl;
-=======
-        callback("[Optimizer] Using Index Scan on '" + std::string(header.columns[colIdx].name) + "'\n");
->>>>>>> main
         
         TablePageManager pm(pager, header);
         

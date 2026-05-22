@@ -11,10 +11,6 @@
 #include "Logger.h"
 #include "TableLockManager.h" // ОБЯЗАТЕЛЬНО
 
-<<<<<<< HEAD
-=======
-
->>>>>>> main
 
 /**
  * Основной цикл выполнения команд
