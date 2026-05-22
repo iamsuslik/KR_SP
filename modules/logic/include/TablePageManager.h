@@ -18,7 +18,7 @@ public:
         if (_header.free_count > 0) {
             uint32_t page_id = _header.free_list[--_header.free_count];
             alignas(PAGE_SIZE) char zero[PAGE_SIZE] = {0};
-            _pager.write_page(page_id, zero);
+            _pager.write_page(page_id, zero).throw_if_error();
             
             return page_id;
         }

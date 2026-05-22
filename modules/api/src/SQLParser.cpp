@@ -28,7 +28,7 @@ std::string SQLParser::toUpper(std::string s) {
 //     return !(hasUpper && hasLower);
 // }
 
-Value SQLParser::parseLiteral(const std::string& token) {
+Value SQLParser::parseLiteral(const std::string& token) const{
     if (token.empty()) return Value();
     
     // Если это строка в кавычках

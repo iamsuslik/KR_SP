@@ -148,7 +148,7 @@ enum class StatusCode {
     
     // Синтаксис
     SYNTAX_ERROR,
-    INTERNAL_ERROR
+    INTERNAL_ERROR,
 
     TASK_PENDING,   // Когда сервер получил запрос, но еще не посчитал (для асинхронности)
 };
@@ -162,6 +162,11 @@ struct [[nodiscard]] Result {
     // Вспомогательные методы для чистого кода
     bool isOk() const { return code == StatusCode::OK; }
     
+    void throw_if_error() const {
+        if (code != StatusCode::OK) {
+            throw DbException(code, details);
+        }
+    }
     // Статические методы для удобного создания результатов
     static Result Success(RecordID r = {0,0}) { return {StatusCode::OK, "", r}; }
     static Result Error(StatusCode c, std::string d = "") { return {c, d}; }
