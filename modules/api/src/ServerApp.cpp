@@ -4,6 +4,7 @@
 #include "TelemetryManager.h"
 #include "AsyncManager.h"
 #include "Logger.h"
+#include "TableLockManager.h"
 
 #include <iostream>
 #include <vector>
@@ -19,6 +20,7 @@
 #include <errno.h>
 #include <atomic>
 
+TableLockManager g_lock_manager;
 // Глобальный флаг состояния для безопасной остановки сервера (Graceful Shutdown)
 std::atomic<bool> g_keep_running{true};
 

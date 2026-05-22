@@ -9,20 +9,27 @@
 #include "TableManager.h"
 #include "SQLParser.h"
 #include "Logger.h"
+#include "TableLockManager.h" // ОБЯЗАТЕЛЬНО
 
+// Инстанцируем глобальный менеджер блокировок для локального режима
+TableLockManager g_lock_manager;
+
+/**
+ * Основной цикл выполнения команд
+ */
 void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser, bool isInteractive) {
     std::string line;
     std::string buffer;
 
     if (isInteractive) {
-        std::cout << "DBMS Shell started. End commands with ';'. Type 'exit' to quit.\n";
+        std::cout << "\033[34mDBMS Standalone Shell started. Use ';' to execute.\033[0m\n";
     }
 
     while (true) {
-        if (isInteractive) std::cout << (buffer.empty() ? "sql> " : "  -> ");
+        if (isInteractive) std::cout << (buffer.empty() ? "\033[32msql> \033[0m" : "  -> ");
         
         if (!std::getline(input, line)) break;
-        if (isInteractive && line == "exit") break;
+        if (isInteractive && (line == "exit" || line == "quit")) break;
 
         buffer += line + " ";
 
@@ -30,52 +37,51 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
         while ((pos = buffer.find(';')) != std::string::npos) {
             std::string query = buffer.substr(0, pos);
 
-            // Засекаем время начала выполнения запроса
             auto start = std::chrono::high_resolution_clock::now();
 
-            // Создаем лямбду-колбэк (Callback)
-            // Всё, что СУБД захочет "сказать" пользователю, придет в этот msg
+            // Коллбэк для вывода данных на экран
             auto print_to_screen = [](const std::string& msg) {
-                std::cout << msg;
+                std::cout << msg << std::flush;
             };
 
-            // Вызываем парсер с ТРЕМЯ аргументами (новая сигнатура)
-            parser.process(query, hm, print_to_screen);
+            // Вызываем обновленный парсер (теперь он возвращает Result!)
+            Result res = parser.process(query, hm, print_to_screen);
 
-            // Засекаем время окончания и считаем длительность
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-            // Логируем запрос (Задание №7)
-            Logger::log(query, "PROCESSED", duration);
+            // Логируем результат (Задание №7)
+            // Мы передаем статус SUCCESS или ERROR на основе Result
+            Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", duration);
 
-            // Очищаем обработанную часть буфера
+            if (isInteractive) std::cout << std::endl;
+
             buffer.erase(0, pos + 1);
         }
     }
 }
 
 int main(int argc, char* argv[]) {
+    // Настройка окружения (можно добавить игнорирование сигналов, как в сервере)
     HierarchyManager hm;
     SQLParser parser;
 
-    // Режим работы выбирается на основе аргументов командной строки
-    if (argc == 1) {
-        // Интерактивный режим (ввод из терминала)
-        runQueryEngine(std::cin, hm, parser, true);
-    } 
-    else if (argc == 2) {
-        // Пакетный режим (выполнение скрипта из файла)
-        std::ifstream scriptFile(argv[1]);
-        if (!scriptFile.is_open()) {
-            std::cerr << "[Error] Could not open script file: " << argv[1] << "\n";
-            return 1;
+    try {
+        if (argc == 1) {
+            // Интерактивный режим
+            runQueryEngine(std::cin, hm, parser, true);
+        } 
+        else {
+            // Пакетный режим (скрипт)
+            std::ifstream scriptFile(argv[1]);
+            if (!scriptFile.is_open()) {
+                std::cerr << "\033[31m[Error] Could not open file: " << argv[1] << "\033[0m\n";
+                return 1;
+            }
+            runQueryEngine(scriptFile, hm, parser, false);
         }
-        std::cout << "[Batch Mode] Executing script: " << argv[1] << "\n";
-        runQueryEngine(scriptFile, hm, parser, false);
-    } 
-    else {
-        std::cerr << "Usage: " << argv[0] << " [script.txt]\n";
+    } catch (const std::exception& e) {
+        std::cerr << "\033[31m[Fatal Error] " << e.what() << "\033[0m\n";
         return 1;
     }
     

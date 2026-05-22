@@ -33,56 +33,74 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
     }
 }
 
+Result TableManager::checkUniqueConstraints(Pager& pager, TableHeader& header, const Row& row, TablePageManager& pm) {
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        // Если колонка должна быть уникальной (INDEXED) и дерево существует
+        if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
+            
+            if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
+                BP_tree<int> index(pager, header.root_page_ids[i], pm);
+                if (index.contains(row[i].int_val)) {
+                    return Result::Error(StatusCode::DUPLICATE_KEY, "Column '" + std::string(header.columns[i].name) + "'");
+                }
+            } 
+            else { // DataType::STR
+                BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm);
+                IndexKeyStr key{};
+                std::memset(key.data, 0, TYPE_STR_SIZE);
+                std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
+                
+                if (index.contains(key)) {
+                    return Result::Error(StatusCode::DUPLICATE_KEY, "Column '" + std::string(header.columns[i].name) + "'");
+                }
+            }
+        }
+    }
+    return Result::Success();
+}
+
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     try {
+        // 1. ПОТОКОБЕЗОПАСНОСТЬ: Эксклюзивный замок на таблицу
         std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
+        
         Pager pager(full_path);
         TableHeader header;
 
-        Result read_res = pager.read_page(0, &header);
-        if (!read_res.isOk()) {
+        // 2. Читаем заголовок
+        if (!pager.read_page(0, &header).isOk()) {
             return Result::Error(StatusCode::IO_ERROR, "Failed to read table header");
         }
 
         TablePageManager pm(pager, header);
 
-        for (uint32_t i = 0; i < header.column_count; ++i) {
-            if (header.columns[i].is_indexed && header.root_page_ids[i] != 0) {
-                if (header.columns[i].type == 0) { // INT
-                    BP_tree<int> index(pager, header.root_page_ids[i], pm);
-                    if (index.contains(row[i].int_val)) {
-                        return Result::Error(StatusCode::DUPLICATE_KEY, "Column '" + std::string(header.columns[i].name) + "'");
-                    }
-                } else { // STR
-                    BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm);
-                    IndexKeyStr key{};
-                    std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-                    if (index.contains(key)) {
-                        return Result::Error(StatusCode::DUPLICATE_KEY, "Column '" + std::string(header.columns[i].name) + "'");
-                    }
-                }
-            }
-        }
+        // 3. ПРОВЕРКА УНИКАЛЬНОСТИ (Вынесли в метод)
+        Result constr_res = checkUniqueConstraints(pager, header, row, pm);
+        if (!constr_res.isOk()) return constr_res;
 
-        uint32_t initial_free_count = header.free_count;
+        // 4. ПОИСК СВОБОДНОГО МЕСТА
         RecordID rid = findAvailableSlot(pager, header);
+        if (rid.page_id == 0) return Result::Error(StatusCode::OUT_OF_MEMORY, "No space left on disk");
         
+        // 5. ЗАПИСЬ ДАННЫХ
         alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
         if (!pager.read_page(rid.page_id, page_buffer).isOk()) {
             return Result::Error(StatusCode::IO_ERROR, "Failed to read data page");
         }
 
-        Result res = RecordManager::serializeRow(row, page_buffer + (rid.slot_id * header.row_size), header);
-        if (!res.isOk()) return res;
+        // Сериализация (с проверкой NOT_NULL и DEFAULT внутри)
+        Result ser_res = RecordManager::serializeRow(row, page_buffer + (rid.slot_id * header.row_size), header);
+        if (!ser_res.isOk()) return ser_res;
 
+        // Физическая запись страницы на диск
         if (!pager.write_page(rid.page_id, page_buffer).isOk()) {
             return Result::Error(StatusCode::IO_ERROR, "Failed to write data page");
         }
 
-        if (header.free_count != initial_free_count) {
-            pager.write_page(0, &header);
-        }
+        // 6. ОБНОВЛЕНИЕ МЕТАДАННЫХ (если изменился Free List)
+        pager.write_page(0, &header);
 
+        // 7. СИНХРОНИЗАЦИЯ ИНДЕКСОВ (B+ дерево)
         updateIndices(pager, header, row, rid);
 
         return Result::Success(rid);
