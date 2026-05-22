@@ -14,17 +14,29 @@ public:
     using OutputCallback = std::function<void(const std::string&)>;
 
     // Главный метод теперь принимает колбэк
-    void process(const std::string& query, HierarchyManager& hm, OutputCallback callback);
+    Result process(const std::string& query, HierarchyManager& hm, OutputCallback callback);
 
 private:
+    int findColumnIndex(const TableHeader& header, const std::string& colName) const;
+    bool applyConstraints(Row& row, const TableHeader& header, OutputCallback callback) const;
+    size_t findKeyword(const std::vector<std::string>& tokens, const std::string& keyword);
+    Result parseProjection(const std::vector<std::string>& tokens, size_t fromIdx, 
+                       std::vector<std::string>& selectedCols, 
+                       std::vector<AggregateRequest>& aggs, 
+                       std::map<std::string, std::string>& aliases);
+    Result parseColumnDefinitions(const std::vector<std::string>& tokens, size_t& index, std::vector<ColumnDef>& outCols);
+    void applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& values, std::stack<std::string>& ops);
+    Result validateTokenCase(const std::vector<std::string>& tokens, OutputCallback callback);
+    Result handleDrop(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    std::shared_ptr<ExpressionNode> createLeaf(const std::string& token);
     // Все обработчики теперь тоже принимают колбэк
-    void handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
-    void handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
+    Result handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback);
 
     // Вспомогательные методы (остаются без изменений)
     Value parseLiteral(const std::string& token);
