@@ -35,6 +35,7 @@ set(DB_LIB_SOURCES
     logic/src/TableManager.cpp
     logic/src/RecordManager.cpp
     logger/src/Logger.cpp
+    shared/src/ErrorUtils.cpp
 )
 add_library(db_logic STATIC ${DB_LIB_SOURCES})
 

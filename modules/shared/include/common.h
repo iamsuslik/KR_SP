@@ -9,13 +9,13 @@
 
 // --- 1. Базовые константы ---
 constexpr int PAGE_SIZE = 4096;
-const int MAX_COLUMNS = 32;
-const int MAX_FREE_PAGES = 100;
-const int MAX_NAME_LEN = 32;
-const int TYPE_STR_SIZE = 64;
-const int TYPE_INT_SIZE = 4;
-const int ROW_METADATA_SIZE = sizeof(bool) + sizeof(uint16_t);
-const size_t PAGE_INTERNAL_RESERVE = 64;
+constexpr const int MAX_COLUMNS = 32;
+constexpr const int MAX_FREE_PAGES = 100;
+constexpr const int MAX_NAME_LEN = 32;
+constexpr const int TYPE_STR_SIZE = 64;
+constexpr const int TYPE_INT_SIZE = 4;
+constexpr const int ROW_METADATA_SIZE = sizeof(bool) + sizeof(uint16_t);
+constexpr const size_t PAGE_INTERNAL_RESERVE = 64;
 
 // --- 3. Физические структуры (бинарные) ---
 struct RecordID {
@@ -127,11 +127,42 @@ struct ExpressionNode {
     std::shared_ptr<ExpressionNode> right;
 };
 
+enum class StatusCode {
+    OK = 0,
+    // Системные ошибки
+    IO_ERROR,
+    NOT_FOUND,
+    ALREADY_EXISTS,
+    OUT_OF_MEMORY,
+    
+    // Ошибки СУБД (Валидация)
+    TABLE_NOT_FOUND,
+    DATABASE_NOT_FOUND,
+    COLUMN_NOT_FOUND,
+    TYPE_MISMATCH,
+    
+    // Ошибки данных (Констрейнты)
+    DUPLICATE_KEY,
+    NOT_NULL_VIOLATION,
+    INVALID_VALUE,
+    
+    // Синтаксис
+    SYNTAX_ERROR,
+    INTERNAL_ERROR
+};
+
 struct Result {
-    bool success;
-    std::string message;
+    StatusCode code;
+    std::string details; // Дополнительная информация (например, имя проблемной колонки)
     RecordID rid = {0, 0};
     std::string path = "";
+
+    // Вспомогательные методы для чистого кода
+    bool isOk() const { return code == StatusCode::OK; }
+    
+    // Статические методы для удобного создания результатов
+    static Result Success(RecordID r = {0,0}) { return {StatusCode::OK, "", r}; }
+    static Result Error(StatusCode c, std::string d = "") { return {c, d}; }
 };
 
 enum class AggregateType { NONE, COUNT, SUM, AVG };
