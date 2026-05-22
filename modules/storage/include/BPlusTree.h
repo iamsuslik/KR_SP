@@ -25,7 +25,7 @@ public:
 
         // 1. Спускаемся к самому левому листу дерева
             while (true) {
-                _pager.read_page(curr_id, buffer);
+                _pager.read_page(curr_id, buffer).throw_if_error();
                 auto* base = reinterpret_cast<bptree_node_base*>(buffer);
                 if (base->_is_terminate) break;
             
@@ -36,7 +36,7 @@ public:
 
         // 2. Идем по цепочке листьев ("паровозиком") через _next
             while (curr_id != 0) {
-                _pager.read_page(curr_id, buffer);
+                _pager.read_page(curr_id, buffer).throw_if_error();
                 auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
             
                 for (uint32_t i = 0; i < leaf->_count; ++i) {
@@ -126,7 +126,7 @@ private:
     void shrink_root();
     bool is_node_underfull(const bptree_node_base* node) const;
 
-    void write_node(uint32_t page_id, const void* buffer) { _pager.write_page(page_id, buffer); }
+    void write_node(uint32_t page_id, const void* buffer) { _pager.write_page(page_id, buffer).throw_if_error(); }
 };
 
 template <typename tkey, std::size_t t, typename compare>
@@ -138,7 +138,7 @@ uint32_t BP_tree<tkey, t, compare>::find_path(const tkey& key, std::vector<uint3
     alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
 
     while (true) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         auto* base = reinterpret_cast<bptree_node_base*>(buffer);
         if (base->_is_terminate) break;
         path.push_back(curr_id);
@@ -192,7 +192,7 @@ Result BP_tree<tkey, t, compare>::find(const tkey& key, RecordID& out_rid) const
     alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
 
     while (true) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
         if (base->_is_terminate) break;
 
@@ -233,7 +233,7 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
     alignas(4096) char buffer[PAGE_SIZE];
 
     while (true) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
         
         if (base->_is_terminate) break;
@@ -256,7 +256,7 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
     } 
     else if (leaf->_next != 0) {
         uint32_t next_leaf_id = leaf->_next;
-        _pager.read_page(next_leaf_id, buffer);
+        _pager.read_page(next_leaf_id, buffer).throw_if_error();
         auto* next_leaf = reinterpret_cast<const bptree_node_term*>(buffer);
         
         if (next_leaf->_count > 0) {
@@ -278,7 +278,7 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
     uint32_t curr_id = _root_id;
     alignas(4096) char buffer[PAGE_SIZE];
     while (true) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
         
         if (base->_is_terminate) break;
@@ -298,7 +298,7 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
         return Result::Success(out_rid);
     } 
     else if (leaf->_next != 0) {
-        _pager.read_page(leaf->_next, buffer);
+        _pager.read_page(leaf->_next, buffer).throw_if_error();
         auto* next_leaf = reinterpret_cast<const bptree_node_term*>(buffer);
         if (next_leaf->_count > 0) {
             out_rid = next_leaf->_data[0].second;
@@ -314,8 +314,8 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::split_node(uint32_t node_id, uint32_t parent_id) {
-    alignas(4096) char buffer[PAGE_SIZE];
-    _pager.read_page(node_id, buffer);
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+    _pager.read_page(node_id, buffer).throw_if_error();
     auto* base = reinterpret_cast<bptree_node_base*>(buffer);
 
     if (base->_is_terminate) {
@@ -328,9 +328,9 @@ void BP_tree<tkey, t, compare>::split_node(uint32_t node_id, uint32_t parent_id)
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id) {
-    alignas(4096) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
+    alignas(PAGE_SIZE) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
 
-    _pager.read_page(leaf_id, l_buf);
+    _pager.read_page(leaf_id, l_buf).throw_if_error();
     auto* l_leaf = reinterpret_cast<bptree_node_term*>(l_buf);
 
     uint32_t new_leaf_id = allocate_new_page();
@@ -349,7 +349,7 @@ void BP_tree<tkey, t, compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id)
 
     tkey key_to_parent = r_leaf->_data[0].first;
 
-    _pager.read_page(parent_id, p_buf);
+    _pager.read_page(parent_id, p_buf).throw_if_error();
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
     size_t pos = binary_search_in_node(parent, key_to_parent);
 
@@ -361,17 +361,17 @@ void BP_tree<tkey, t, compare>::split_leaf(uint32_t leaf_id, uint32_t parent_id)
     parent->_pointers[pos + 1] = new_leaf_id;
     parent->_count++;
 
-    _pager.write_page(leaf_id, l_buf);
-    _pager.write_page(new_leaf_id, r_buf);
-    _pager.write_page(parent_id, p_buf);
+    _pager.write_page(leaf_id, l_buf).throw_if_error();
+    _pager.write_page(new_leaf_id, r_buf).throw_if_error();
+    _pager.write_page(parent_id, p_buf).throw_if_error();
 }
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id) {
-    alignas(4096) char m_buf[PAGE_SIZE], n_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
+    alignas(PAGE_SIZE) char m_buf[PAGE_SIZE], n_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
 
-    _pager.read_page(mid_id, m_buf);
+    _pager.read_page(mid_id, m_buf).throw_if_error();
     auto* old_mid = reinterpret_cast<bptree_node_middle*>(m_buf);
 
     uint32_t new_mid_id = allocate_new_page();
@@ -395,7 +395,7 @@ void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id
     old_mid->_count = (uint32_t)t - 1;
 
     // Вставляем ключ и новый указатель в родителя
-    _pager.read_page(parent_id, p_buf);
+    _pager.read_page(parent_id, p_buf).throw_if_error();
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
     
     size_t pos = binary_search_in_node(parent, up_key);
@@ -407,9 +407,9 @@ void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id
     parent->_pointers[pos+1] = new_mid_id;
     parent->_count++;
 
-    _pager.write_page(mid_id, m_buf);
-    _pager.write_page(new_mid_id, n_buf);
-    _pager.write_page(parent_id, p_buf);
+    _pager.write_page(mid_id, m_buf).throw_if_error();
+    _pager.write_page(new_mid_id, n_buf).throw_if_error();
+    _pager.write_page(parent_id, p_buf).throw_if_error();
 }
 
 
@@ -422,9 +422,9 @@ bool BP_tree<tkey, t, compare>::is_node_full(const bptree_node_base* node) const
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::balance_insert(uint32_t curr_id, std::vector<uint32_t>& path) {
-    alignas(4096) char buffer[4096];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     while (true) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         if (reinterpret_cast<bptree_node_base*>(buffer)->_count <= maximum_keys_in_node) break;
         if (curr_id == _root_id) {
             grow_tree(); break;
@@ -441,14 +441,14 @@ requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::grow_tree() {
     uint32_t new_root_id = allocate_new_page();
 
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     std::memset(buffer, 0, PAGE_SIZE);
 
     auto* new_root = new (buffer) bptree_node_middle();
 
     new_root->_pointers[0] = _root_id;
     new_root->_count = 0;
-    _pager.write_page(new_root_id, buffer);
+    _pager.write_page(new_root_id, buffer).throw_if_error();
     uint32_t old_root_id = _root_id;
     _root_id = new_root_id;
     split_node(old_root_id, new_root_id);
@@ -464,7 +464,7 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     if (_root_id == 0) {
         uint32_t new_root_id = allocate_new_page();
         
-        alignas(4096) char buffer[PAGE_SIZE];
+        alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
         std::memset(buffer, 0, PAGE_SIZE);
 
         auto* first_leaf = new (buffer) bptree_node_term();
@@ -472,7 +472,7 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
         first_leaf->_data[0] = std::make_pair(key, rid);
         first_leaf->_count = 1;
 
-        _pager.write_page(new_root_id, buffer);
+        _pager.write_page(new_root_id, buffer).throw_if_error();
 
         _root_id = new_root_id;
 
@@ -483,7 +483,7 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     uint32_t leaf_id = find_path(key, path);
 
     alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
-    _pager.read_page(leaf_id, buffer);
+    _pager.read_page(leaf_id, buffer).throw_if_error();
     auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
 
     size_t pos = binary_search_in_node(leaf, key);
@@ -497,7 +497,7 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
     leaf->_data[pos] = std::make_pair(key, rid);
     leaf->_count++;
 
-    _pager.write_page(leaf_id, buffer);
+    _pager.write_page(leaf_id, buffer).throw_if_error();
 
     balance_insert(leaf_id, path);
 
@@ -515,8 +515,8 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
     bool has_next = false;
     Result next_res = upper_bound(key_del, next_rid);
     if (next_res.isOk()) {
-        alignas(4096) char tmp_buf[PAGE_SIZE];
-        _pager.read_page(next_rid.page_id, tmp_buf);
+        alignas(PAGE_SIZE) char tmp_buf[PAGE_SIZE];
+        _pager.read_page(next_rid.page_id, tmp_buf).throw_if_error();
         auto* next_leaf = reinterpret_cast<bptree_node_term*>(tmp_buf);
         next_key = next_leaf->_data[next_rid.slot_id].first;
         has_next = true;
@@ -525,8 +525,8 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
     std::vector<uint32_t> path;
     uint32_t leaf_id = find_path(key_del, path);
 
-    alignas(4096) char buffer[PAGE_SIZE];
-    _pager.read_page(leaf_id, buffer);
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+    _pager.read_page(leaf_id, buffer).throw_if_error();
     auto* leaf = reinterpret_cast<bptree_node_term*>(buffer);
     size_t actual_idx = binary_search_in_node(leaf, key_del);
 
@@ -541,7 +541,7 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
         }
     }
     leaf->_count--;
-    _pager.write_page(leaf_id, buffer);
+    _pager.write_page(leaf_id, buffer).throw_if_error();
     if (is_node_underfull(leaf) && leaf_id != _root_id) {
         balance_delete(leaf_id, path);
     }
@@ -570,7 +570,7 @@ void BP_tree<tkey, t, compare>::shrink_root()
     alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     
     // ПРОВЕРКА I/O (хорошо бы добавить, но можно оставить так для void)
-    _pager.read_page(_root_id, buffer);
+    _pager.read_page(_root_id, buffer).throw_if_error();
     auto* root_base = reinterpret_cast<bptree_node_base*>(buffer);
 
     // Если корень - это лист, дерево не может больше сжиматься
@@ -594,9 +594,9 @@ template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::balance_delete(uint32_t curr_id, std::vector<uint32_t>& path) 
 {
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     while (curr_id != _root_id) {
-        _pager.read_page(curr_id, buffer);
+        _pager.read_page(curr_id, buffer).throw_if_error();
         auto* node = reinterpret_cast<bptree_node_base*>(buffer);
         if (!is_node_underfull(node)) break;
         if (path.empty()) break;
@@ -616,8 +616,8 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
 {
     alignas(PAGE_SIZE) char c_buf[PAGE_SIZE], p_buf[PAGE_SIZE], s_buf[PAGE_SIZE];
     
-    _pager.read_page(curr_id, c_buf);
-    _pager.read_page(parent_id, p_buf);
+    _pager.read_page(curr_id, c_buf).throw_if_error();
+    _pager.read_page(parent_id, p_buf).throw_if_error();
     
     auto* curr = reinterpret_cast<bptree_node_base*>(c_buf);
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
@@ -629,7 +629,7 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
     // СЛУЧАЙ А: Занимаем у ПРАВОГО соседа
     if (idx < parent->_count) {
         uint32_t sib_id = parent->_pointers[idx + 1];
-        _pager.read_page(sib_id, s_buf);
+        _pager.read_page(sib_id, s_buf).throw_if_error();
         auto* sib = reinterpret_cast<bptree_node_base*>(s_buf);
 
         if (sib->_count > minimum_keys_in_node) {
@@ -662,9 +662,9 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
                 }
             }
             curr->_count++; sib->_count--;
-            _pager.write_page(curr_id, c_buf); 
-            _pager.write_page(sib_id, s_buf); 
-            _pager.write_page(parent_id, p_buf);
+            _pager.write_page(curr_id, c_buf).throw_if_error();
+            _pager.write_page(sib_id, s_buf).throw_if_error();
+            _pager.write_page(parent_id, p_buf).throw_if_error();
             return true;
         }
     }
@@ -672,7 +672,7 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
     // СЛУЧАЙ Б: Занимаем у ЛЕВОГО соседа
     if (idx > 0) {
         uint32_t sib_id = parent->_pointers[idx - 1];
-        _pager.read_page(sib_id, s_buf);
+        _pager.read_page(sib_id, s_buf).throw_if_error();
         auto* sib = reinterpret_cast<bptree_node_base*>(s_buf);
 
         if (sib->_count > minimum_keys_in_node) {
@@ -705,9 +705,9 @@ bool BP_tree<tkey, t, compare>::borrow_sibling(uint32_t curr_id, uint32_t parent
                 parent->_keys[idx - 1] = std::move(s_mid->_keys[sib->_count - 1]);
             }
             curr->_count++; sib->_count--;
-            _pager.write_page(curr_id, c_buf); 
-            _pager.write_page(sib_id, s_buf); 
-            _pager.write_page(parent_id, p_buf);
+            _pager.write_page(curr_id, c_buf).throw_if_error();
+            _pager.write_page(sib_id, s_buf).throw_if_error();
+            _pager.write_page(parent_id, p_buf).throw_if_error();
             return true;
         }
     }
@@ -719,9 +719,9 @@ template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
 void BP_tree<tkey, t, compare>::merge_sibling(uint32_t curr_id, uint32_t parent_id) 
 {
-    alignas(4096) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
+    alignas(PAGE_SIZE) char l_buf[PAGE_SIZE], r_buf[PAGE_SIZE], p_buf[PAGE_SIZE];
     
-    _pager.read_page(parent_id, p_buf);
+    _pager.read_page(parent_id, p_buf).throw_if_error();
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
     size_t idx = 0;
     while (idx <= parent->_count && parent->_pointers[idx] != curr_id){ 
@@ -732,8 +732,8 @@ void BP_tree<tkey, t, compare>::merge_sibling(uint32_t curr_id, uint32_t parent_
     uint32_t l_id = parent->_pointers[left_idx];
     uint32_t r_id = parent->_pointers[left_idx + 1];
 
-    _pager.read_page(l_id, l_buf);
-    _pager.read_page(r_id, r_buf);
+    _pager.read_page(l_id, l_buf).throw_if_error();
+    _pager.read_page(r_id, r_buf).throw_if_error();
 
     auto* l_base = reinterpret_cast<bptree_node_base*>(l_buf);
 
@@ -778,8 +778,8 @@ void BP_tree<tkey, t, compare>::merge_sibling(uint32_t curr_id, uint32_t parent_
         }
     }
     parent->_count--;
-    _pager.write_page(l_id, l_buf);
-    _pager.write_page(parent_id, p_buf);
+    _pager.write_page(l_id, l_buf).throw_if_error();
+    _pager.write_page(parent_id, p_buf).throw_if_error();
 
     release_page(r_id); 
 }

@@ -26,7 +26,7 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
             header.row_size += (schema.columns[i].type == DataType::INT) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
         }
 
-        return pager.write_page(0, &header);
+        return pager.write_page(0, &header).throw_if_error()
 
     } catch (const std::exception& e) {
         return Result::Error(StatusCode::INTERNAL_ERROR, std::string("Table creation failed: ") + e.what());
@@ -61,51 +61,40 @@ Result TableManager::checkUniqueConstraints(Pager& pager, TableHeader& header, c
 
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     try {
-        // 1. ПОТОКОБЕЗОПАСНОСТЬ: Эксклюзивный замок на таблицу
         std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
-        
         Pager pager(full_path);
         TableHeader header;
 
-        // 2. Читаем заголовок
-        if (!pager.read_page(0, &header).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to read table header");
-        }
+        // Вместо IF теперь просто вызываем и пробрасываем исключение вверх, если что-то не так
+        pager.read_page(0, &header).throw_if_error();
 
         TablePageManager pm(pager, header);
 
-        // 3. ПРОВЕРКА УНИКАЛЬНОСТИ (Вынесли в метод)
         Result constr_res = checkUniqueConstraints(pager, header, row, pm);
         if (!constr_res.isOk()) return constr_res;
 
-        // 4. ПОИСК СВОБОДНОГО МЕСТА
         RecordID rid = findAvailableSlot(pager, header);
         if (rid.page_id == 0) return Result::Error(StatusCode::OUT_OF_MEMORY, "No space left on disk");
         
-        // 5. ЗАПИСЬ ДАННЫХ
         alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
-        if (!pager.read_page(rid.page_id, page_buffer).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to read data page");
-        }
+        pager.read_page(rid.page_id, page_buffer).throw_if_error();
 
-        // Сериализация (с проверкой NOT_NULL и DEFAULT внутри)
-        Result ser_res = RecordManager::serializeRow(row, page_buffer + (rid.slot_id * header.row_size), header);
-        if (!ser_res.isOk()) return ser_res;
+        Result res = RecordManager::serializeRow(row, page_buffer + (rid.slot_id * header.row_size), header);
+        if (!res.isOk()) return res;
 
-        // Физическая запись страницы на диск
-        if (!pager.write_page(rid.page_id, page_buffer).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to write data page");
-        }
+        pager.write_page(rid.page_id, page_buffer).throw_if_error();
+        pager.write_page(0, &header).throw_if_error();
 
-        // 6. ОБНОВЛЕНИЕ МЕТАДАННЫХ (если изменился Free List)
-        pager.write_page(0, &header);
-
-        // 7. СИНХРОНИЗАЦИЯ ИНДЕКСОВ (B+ дерево)
         updateIndices(pager, header, row, rid);
 
         return Result::Success(rid);
         
-    } catch (const std::exception& e) { 
+    } 
+    // НОВАЯ ОБРАБОТКА (Мега-Проф):
+    catch (const DbException& e) {
+        return Result::Error(e.code(), e.what());
+    }
+    catch (const std::exception& e) { 
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); 
     }
 }
@@ -141,7 +130,7 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header) {
         if (is_protected) continue;
 
         // Читаем страницу. Если ошибка чтения — пропускаем страницу.
-        if (!pager.read_page(p_id, page_buffer).isOk()) continue;
+        pager.read_page(p_id, page_buffer).throw_if_error();
 
         for (int i = 0; i < slots_per_page; ++i) {
             bool occupied;
@@ -314,9 +303,7 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
         TableHeader header; 
         
         // ПРОВЕРКА ЧТЕНИЯ 
-        if (!pager.read_page(0, &header).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to read table header");
-        }
+        pager.read_page(0, &header).throw_if_error();
 
         // Проверка: есть ли в таблице вообще данные?
         uint32_t first_root = 0;
@@ -368,7 +355,7 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const Expr
                                    const std::map<std::string, std::string>& aliases,
                                    const std::vector<AggregateRequest>& aggs, 
                                    long long& t_sum, int& t_count, bool& first, bool isAgg,
-                                   OutputCallback callback) { // ДОБАВИЛИ callback
+                                   OutputCallback callback) {
 
     // 1. Ищем подходящий индекс для оптимизации сканирования
     int colIdx = -1;
@@ -381,37 +368,38 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header, const Expr
         }
     }
 
-    // 2. Если индекс найден — используем Index Scan (обход листьев дерева)
+    // 2. Если индекс найден — используем Index Scan
     if (colIdx != -1 && header.root_page_ids[colIdx] != 0) {
+<<<<<<< HEAD
         // Вместо прямого std::cout отправляем инфо-сообщение в callback (Грех №1)
         std::cerr << "[Optimizer] Using Index Scan on '" << header.columns[colIdx].name << "'" << std::endl;
+=======
+        callback("[Optimizer] Using Index Scan on '" + std::string(header.columns[colIdx].name) + "'\n");
+>>>>>>> main
         
         TablePageManager pm(pager, header);
         
-        // Проверяем тип данных через Enum 
+        // ВАЖНО: Вызов .throw_if_error() внутри лямбды for_each
+        auto processFunc = [&](const RecordID& rid) {
+            alignas(PAGE_SIZE) char buf[PAGE_SIZE];
+            
+            // Если здесь произойдет ошибка, вылетит DbException, 
+            // выполнение выйдет из лямбды, из for_each и попадет в catch в executeSelect.
+            pager.read_page(rid.page_id, buf).throw_if_error();
+            
+            Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
+            processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg, callback);
+        };
+
         if (header.columns[colIdx].type == static_cast<uint8_t>(DataType::INT)) { 
             BP_tree<int> tree(pager, header.root_page_ids[colIdx], pm);
-            tree.for_each([&](const RecordID& rid) {
-                alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-                // ПРОВЕРКА ЧТЕНИЯ 
-                if (pager.read_page(rid.page_id, buf).isOk()) {
-                    Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
-                    processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg, callback);
-                }
-            });
-        } else { // DataType::STR
+            tree.for_each(processFunc);
+        } else { 
             BP_tree<IndexKeyStr> tree(pager, header.root_page_ids[colIdx], pm);
-            tree.for_each([&](const RecordID& rid) {
-                alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-                // ПРОВЕРКА ЧТЕНИЯ 
-                if (pager.read_page(rid.page_id, buf).isOk()) {
-                    Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
-                    processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg, callback);
-                }
-            });
+            tree.for_each(processFunc);
         }
     } 
-    // 3. Если индекса нет — переходим к обычному перебору всех страниц данных (Full Table Scan)
+    // 3. Если индекса нет — Full Table Scan
     else {
         fullScanSelect(pager, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg, callback);
     }
@@ -432,9 +420,7 @@ void TableManager::fullScanSelect(Pager& pager, TableHeader& header, const Expre
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         
         // ПРОВЕРКА ЧТЕНИЯ 
-        if (!pager.read_page(p, page_buffer).isOk()) {
-            continue; // Если страница битая, пропускаем её и идем к следующей
-        }
+        pager.read_page(p, page_buffer).isOk();
 
         for (int i = 0; i < slots_per_page; ++i) {
             char* slot_ptr = page_buffer + (i * header.row_size);
@@ -481,10 +467,7 @@ bool TableManager::executePointQuery(Pager& pager, TableHeader& header, const Ex
         
         alignas(PAGE_SIZE) char buf[PAGE_SIZE];
         // ПРОВЕРКА ЧТЕНИЯ СТРАНИЦЫ 
-        if (!pager.read_page(rid.page_id, buf).isOk()) {
-            return false; // Если страница не прочиталась, считаем, что поиск не удался
-        }
-        
+        pager.read_page(rid.page_id, buf).throw_if_error();
         // Извлекаем строку из найденного слота
         Row row = RecordManager::extractRow(buf + (rid.slot_id * header.row_size), header);
         
@@ -595,53 +578,52 @@ void TableManager::renderAggregates(const std::vector<AggregateRequest>& aggs,
 Result TableManager::executeUpdate(const std::string& full_path, const ExpressionNode* cond, 
                                  const std::string& targetCol, const std::string& newVal) {
     try {
+        // 1. БЛОКИРОВКА
         std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
         TableHeader header;
         
-        // ПРОВЕРКА ЧТЕНИЯ 
-        if (!pager.read_page(0, &header).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to read table header");
-        }
+        pager.read_page(0, &header).throw_if_error();
 
         RecordID rid;
         bool h_changed = false;
 
-        // 1. Оптимизация: Попытка обновить одну строку через индекс (Point Update)
+        // 1. Оптимизация: Point Update
         Result idx_res = getRIDFromIndex(pager, header, cond, rid);
         if (idx_res.isOk()) {
-            alignas(PAGE_SIZE) char buf[PAGE_SIZE]; // Добавили alignas 
+            alignas(PAGE_SIZE) char buf[PAGE_SIZE];
             
-            if (pager.read_page(rid.page_id, buf).isOk()) {
-                char* slot_ptr = buf + (rid.slot_id * header.row_size);
-                Row row = RecordManager::extractRow(slot_ptr, header);
+            // Заменили if на .throw_if_error()
+            pager.read_page(rid.page_id, buf).throw_if_error();
+            
+            char* slot_ptr = buf + (rid.slot_id * header.row_size);
+            Row row = RecordManager::extractRow(slot_ptr, header);
 
-                for (uint32_t c = 0; c < header.column_count; ++c) {
-                    if (targetCol == header.columns[c].name) {
-                        // Обновляем значение и корректируем B+ дерево
-                        updateFieldAndIndex(row, c, newVal, header, pager, rid, h_changed);
-                        
-                        // Сохраняем изменения
-                        RecordManager::serializeRow(row, slot_ptr, header);
-                        pager.write_page(rid.page_id, buf);
-                        
-                        if (h_changed) {
-                            pager.write_page(0, &header);
-                        }
-                        
-                        // Используем Result::Success с информационным сообщением
-                        return {StatusCode::OK, "Updated 1 row (Optimized)"};
+            for (uint32_t c = 0; c < header.column_count; ++c) {
+                if (targetCol == header.columns[c].name) {
+                    updateFieldAndIndex(row, c, newVal, header, pager, rid, h_changed);
+                    
+                    RecordManager::serializeRow(row, slot_ptr, header).throw_if_error();
+                    pager.write_page(rid.page_id, buf).throw_if_error();
+                    
+                    if (h_changed) {
+                        pager.write_page(0, &header).throw_if_error();
                     }
+                    return Result::Success(); // Можно добавить детали в Result
                 }
             }
         }
 
-        // 2. Full Scan: Если индекса нет, перебираем все страницы и обновляем подходящие строки
+        // 2. Full Scan
         int count = fullScanUpdate(pager, header, cond, targetCol, newVal);
-        
-        return {StatusCode::OK, "Updated " + std::to_string(count) + " rows (Full Scan)"};
+        return Result::Success({0, 0}, "Updated " + std::to_string(count) + " rows");
 
-    } catch (const std::exception& e) { 
+    } 
+    // ОБРАБОТКА ОШИБОК:
+    catch (const DbException& e) {
+        return Result::Error(e.code(), e.what());
+    }
+    catch (const std::exception& e) { 
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); 
     }
 }
@@ -654,9 +636,7 @@ int TableManager::fullScanUpdate(Pager& pager, TableHeader& header, const Expres
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         // ПРОВЕРКА ЧТЕНИЯ 
-        if (!pager.read_page(p, page_buffer).isOk()) {
-            continue; // Пропускаем битую страницу
-        }
+        pager.read_page(p, page_buffer).throw_if_error();
 
         bool page_changed = false;
         int slots = PAGE_SIZE / header.row_size;
@@ -703,13 +683,13 @@ int TableManager::fullScanUpdate(Pager& pager, TableHeader& header, const Expres
             }
             
             // ПРОВЕРКА ЗАПИСИ 
-            pager.write_page(p, page_buffer);
+            pager.write_page(p, page_buffer).throw_if_error();
         }
     }
 
     // Если изменились корни деревьев или список свободных страниц — сохраняем Page 0
     if (header_changed) {
-        pager.write_page(0, &header);
+        pager.write_page(0, &header).throw_if_error();
     }
 
     return count;
@@ -806,9 +786,7 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
         TableHeader header;
         
         // ПРОВЕРКА ЧТЕНИЯ 
-        if (!pager.read_page(0, &header).isOk()) {
-            return Result::Error(StatusCode::IO_ERROR, "Failed to read table header");
-        }
+        pager.read_page(0, &header).throw_if_error();
         
         RecordID rid;
         
@@ -833,8 +811,8 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
                 }
                 
                 // Сохраняем изменения на диск
-                pager.write_page(rid.page_id, buf);
-                pager.write_page(0, &header); 
+                pager.write_page(rid.page_id, buf).throw_if_error();
+                pager.write_page(0, &header).throw_if_error(); 
                 
                 return {StatusCode::OK, "Successfully deleted 1 row (Optimized)"};
             }
@@ -844,7 +822,7 @@ Result TableManager::executeDelete(const std::string& full_path, const Expressio
         int count = fullScanDelete(pager, header, cond);
         
         // Сохраняем заголовок (там могли измениться Free List или корни деревьев после удаления)
-        pager.write_page(0, &header); 
+        pager.write_page(0, &header).throw_if_error(); 
         
         return {StatusCode::OK, "Successfully deleted " + std::to_string(count) + " rows (Full Scan)"};
 
@@ -862,9 +840,7 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const Expres
     // Начинаем перебор со страницы 1 (страница 0 зарезервирована под заголовок)
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
 
-        if (!pager.read_page(p, page_buffer).isOk()) {
-            continue; // Если страница не прочиталась, пропускаем её
-        }
+        pager.read_page(p, page_buffer).throw_if_error();
 
         bool page_changed = false;
 
@@ -902,13 +878,13 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const Expres
             }
             
             // ПРОВЕРКА ЗАПИСИ 
-            pager.write_page(p, page_buffer);
+            pager.write_page(p, page_buffer).throw_if_error();
         }
     }
 
     // Если список свободных страниц изменился — сохраняем заголовок таблицы (Page 0)
     if (header_changed) {
-        pager.write_page(0, &header);
+        pager.write_page(0, &header).throw_if_error();
     }
     
     return count;

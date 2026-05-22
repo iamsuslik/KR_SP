@@ -1,13 +1,17 @@
 #ifndef SQL_PARSER_H
 #define SQL_PARSER_H
 
-#include <string>
-#include <vector>
-#include <functional>
 #include "common.h"
 #include "HierarchyManager.h"
 #include "TableManager.h"
+<<<<<<< HEAD
 #include <stack>
+=======
+#include <string>
+#include <vector>
+#include <functional>
+#include <stack> 
+>>>>>>> main
 
 class SQLParser {
 public:
