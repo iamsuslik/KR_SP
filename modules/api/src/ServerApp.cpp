@@ -139,27 +139,35 @@ int main() {
             else {
                 int client_fd = poll_fds[i].fd;
                 
-                // Проверка на обрыв
-                if (poll_fds[i].revents & (POLLERR | POLLHUP)) {
-                    std::clog << "[Network] Disconnected FD: " << client_fd << std::endl;
+                // 1. СРАЗУ читаем весь запрос в главном потоке
+                std::string query = NetworkManager::receiveString(client_fd);
+                
+                if (query.empty()) {
                     close(client_fd);
                     poll_fds.erase(poll_fds.begin() + i);
                     i--;
                     continue;
                 }
 
-                // --- ИСПРАВЛЕНИЕ БЛОКИРОВКИ ---
-                // Вместо вызова NetworkManager::receiveString(client_fd), который заставит
-                // сервер ждать байты, мы просто "выбрасываем" сокет в пул воркеров.
-                // Воркер сам дождется данных, сам обработает и сам закроет сокет.
-                
-                std::clog << "[Network] Task delegated to Worker Pool. FD: " << client_fd << std::endl;
-                
-                // Передаем сокет в асинхронную очередь
-                async_pool.enqueue_socket(client_fd);
+                // 2. Логика асинхронности (Задание 6)
+                if (query.substr(0, 6) == "CHECK ") {
+                    std::string guid = query.substr(6);
+                    // Убираем ';' если пришел запрос "CHECK guid;"
+                    if (!guid.empty() && guid.back() == ';') guid.pop_back();
+                    
+                    auto res = async_pool.fetch_result(guid);
+                    NetworkManager::sendString(client_fd, res.data.empty() ? "Processing..." : res.data);
+                } 
+                else {
+                    // Генерируем GUID и ставим задачу в очередь
+                    std::string guid = async_pool.enqueue(query);
+                    // Мгновенно отвечаем клиенту
+                    NetworkManager::sendString(client_fd, "ASYNC_ID: " + guid);
+                    NetworkManager::sendString(client_fd, "EOF_MARKER");
+                }
 
-                // ВАЖНО: Удаляем сокет из мониторинга poll в главном потоке, 
-                // так как теперь им владеет поток воркера.
+                // 3. Закрываем сокет, так как мы ответили (или поставили задачу)
+                close(client_fd);
                 poll_fds.erase(poll_fds.begin() + i);
                 i--;
             }

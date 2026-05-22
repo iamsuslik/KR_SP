@@ -34,8 +34,6 @@ private:
     struct AsyncTask {
         std::string guid;
         std::string query;
-        std::string query; // Может быть пустым, если мы читаем из сокета
-        int client_fd = -1; // Добавили это поле
     };
 
     // Очередь задач (защищена обычным mutex)
@@ -54,7 +52,6 @@ private:
     void worker_loop();
 
 public:
-    std::string enqueue_socket(int fd);
     // Колбэк-интерфейс для подключения SQLParser
     using Processor = std::function<Result(const std::string&, std::function<void(const std::string&)>)>;
     Processor db_engine;

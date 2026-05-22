@@ -2,6 +2,7 @@
 #include "BPlusTree.h"
 #include "RecordManager.h"
 #include "TablePageManager.h"
+#include "TableLockManager.h"
 #include <iostream>
 #include <cstring>
 #include <regex>
@@ -34,6 +35,7 @@ Result TableManager::createTable(const std::string& full_path, const TableSchema
 
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     try {
+        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
         TableHeader header;
 
@@ -284,6 +286,8 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
                                  const std::vector<AggregateRequest>& aggs,
                                  OutputCallback callback) {
     try {
+        std::shared_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
+
         Pager pager(full_path); 
         TableHeader header; 
         
@@ -303,7 +307,7 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
             if (!aggs.empty()) {
                 renderAggregates(aggs, 0, 0, callback);
             } else {
-                callback("[]\n"); // ВМЕСТО std::cout
+                callback("[]\n"); 
             }
             return Result::Success();
         }
@@ -317,15 +321,15 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
         // 1. Пытаемся выполнить оптимизированный точечный поиск (Point Query) по индексу
         if (!executePointQuery(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first, callback)) {
             
-            // 2. Если Point Query не применим (сложное условие или нет индекса) — делаем сканирование
-            if (!isAgg) callback("[\n"); // Открываем JSON массив через колбэк
+            // 2. Если Point Query не применим — делаем сканирование
+            if (!isAgg) callback("[\n"); 
             
             executeTreeScan(pager, header, cond, colsToPrint, aliases, aggs, t_sum, t_count, first, isAgg, callback);
             
-            if (!isAgg) callback("\n]\n"); // Закрываем JSON массив через колбэк
+            if (!isAgg) callback("\n]\n"); 
         }
 
-        // Если были запрошены агрегатные функции (SUM, COUNT, AVG) — выводим результат расчетов
+        // Если были запрошены агрегатные функции — выводим результат
         if (isAgg) {
             renderAggregates(aggs, t_sum, t_count, callback);
         }
@@ -333,7 +337,6 @@ Result TableManager::executeSelect(const std::string& full_path, const Expressio
         return Result::Success();
 
     } catch (const std::exception& e) { 
-        // Использование кода INTERNAL_ERROR (Грех №7)
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); 
     }
 }
@@ -571,6 +574,7 @@ void TableManager::renderAggregates(const std::vector<AggregateRequest>& aggs,
 Result TableManager::executeUpdate(const std::string& full_path, const ExpressionNode* cond, 
                                  const std::string& targetCol, const std::string& newVal) {
     try {
+        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
         TableHeader header;
         
@@ -776,6 +780,7 @@ void TableManager::clearIndicesForRow(Pager& pager, TableHeader& header, const R
 
 Result TableManager::executeDelete(const std::string& full_path, const ExpressionNode* cond) {
     try {
+        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
         TableHeader header;
         
@@ -835,8 +840,7 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const Expres
 
     // Начинаем перебор со страницы 1 (страница 0 зарезервирована под заголовок)
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        
-        // ПРОВЕРКА ЧТЕНИЯ (Грех №5)
+
         if (!pager.read_page(p, page_buffer).isOk()) {
             continue; // Если страница не прочиталась, пропускаем её
         }

@@ -54,18 +54,9 @@ AsyncResult AsyncManager::fetch_result(const std::string& guid) {
 void AsyncManager::worker_loop() {
     while (true) {
         AsyncTask task;
-        
-        // 1. Ждем задачу. Если сервер останавливается - выходим.
         if (!try_get_task(task)) return;
 
-        // 2. Получаем текст запроса (из структуры или из сокета)
-        std::string query = get_query_text(task);
-        if (query.empty() && task.client_fd != -1) {
-            close(task.client_fd);
-            continue;
-        }
-
-        // 3. Выполняем запрос и отправляем ответ
+        std::string query = task.query; 
         process_and_finalize(task, query);
     }
 }
@@ -82,47 +73,23 @@ bool AsyncManager::try_get_task(AsyncTask& task) {
     return true;
 }
 
-// ЭТАП 2: Чтение данных (логика "узкого горлышка" теперь в отдельном потоке)
+// ЭТАП 2: Чтение данных
 std::string AsyncManager::get_query_text(const AsyncTask& task) {
-    if (task.client_fd != -1) {
-        // Здесь поток может заблокироваться на чтении, но это не мешает основному серверу
-        return NetworkManager::receiveString(task.client_fd);
-    }
     return task.query;
 }
 
 // ЭТАП 3: Выполнение логики БД и отправка ответа в сокет
-// Исправленный метод в AsyncManager.cpp
 void AsyncManager::process_and_finalize(AsyncTask& task, const std::string& query) {
     std::string result_buffer;
     StatusCode sc = StatusCode::OK;
 
-    // 1. ПРОВЕРКА: Это команда CHECK или SQL-запрос?
-    if (query.size() > 6 && query.substr(0, 6) == "CHECK ") {
-        // Логика CHECK (прямое чтение из реестра)
-        std::string target_guid = query.substr(6);
-        AsyncResult res = fetch_result(target_guid);
-        
-        if (res.status == AsyncStatus::COMPLETED) result_buffer = res.data;
-        else if (res.status == AsyncStatus::FAILED) result_buffer = "[Error] Task failed.";
-        else result_buffer = "[Pending] Still processing...";
-    } 
-    else {
-        // Логика SQL-запроса (через движок БД)
-        if (db_engine && !query.empty()) {
-            auto output_cb = [&](const std::string& s) { result_buffer += s; };
-            sc = db_engine(query, output_cb).code;
-        }
+    // Выполняем SQL-запрос через движок
+    if (db_engine && !query.empty()) {
+        auto output_cb = [&](const std::string& s) { result_buffer += s; };
+        sc = db_engine(query, output_cb).code;
     }
 
-    // 2. ОТВЕТ В СЕТЬ
-    if (task.client_fd != -1) {
-        NetworkManager::sendString(task.client_fd, result_buffer);
-        NetworkManager::sendString(task.client_fd, "EOF_MARKER");
-        close(task.client_fd);
-    }
-
-    // 3. ОБНОВЛЕНИЕ РЕЕСТРА (для истории)
+    // Просто обновляем реестр, чтобы клиент мог забрать результат по CHECK
     update_registry(task.guid, std::move(result_buffer), sc);
 }
 
@@ -138,19 +105,4 @@ void AsyncManager::update_registry(const std::string& guid, std::string buf, Sta
     if (registry.count(guid)) {
         registry[guid] = {AsyncStatus::COMPLETED, std::move(buf), sc, timestamp};
     }
-}
-
-std::string AsyncManager::enqueue_socket(int fd) {
-    std::string guid = generate_guid_v4();
-    {
-        std::unique_lock lock(registry_mtx);
-        registry[guid] = {AsyncStatus::PENDING, "", StatusCode::OK, ""};
-        history_fifo.push_back(guid);
-    }
-    {
-        std::lock_guard<std::mutex> lock(queue_mtx);
-        task_queue.push({guid, "", fd}); // Передаем сокет, query пока пустой
-    }
-    cv.notify_one();
-    return guid;
 }
