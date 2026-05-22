@@ -18,20 +18,19 @@
 #include <signal.h>
 #include <errno.h>
 #include <atomic>
+#include <thread>
 
-// Глобальный флаг состояния для безопасной остановки сервера (Graceful Shutdown)
+// Константы конфигурации
+static constexpr int POLL_TIMEOUT_MS = 1000;
+static constexpr const char* CMD_CHECK = "CHECK ";
+
+// Глобальный флаг состояния для безопасной остановки сервера
 std::atomic<bool> g_keep_running{true};
 
-/**
- * Обработчик системных сигналов завершения.
- */
 void handle_shutdown_signal(int sig_num) {
     g_keep_running = false;
 }
 
-/**
- * Переводит файловый дескриптор в неблокирующий режим работы.
- */
 bool set_fd_nonblocking(int fd) {
     int current_flags = fcntl(fd, F_GETFL, 0);
     if (current_flags == -1) return false;
@@ -42,45 +41,35 @@ int main() {
     // 1. НАСТРОЙКА ОКРУЖЕНИЯ
     signal(SIGINT,  handle_shutdown_signal);
     signal(SIGTERM, handle_shutdown_signal);
-    signal(SIGPIPE, SIG_IGN); // Игнорируем обрывы сокетов, чтобы сервер не падал
+    signal(SIGPIPE, SIG_IGN);
 
     // 2. ИНИЦИАЛИЗАЦИЯ КОМПОНЕНТОВ
     HierarchyManager hm;
     SQLParser parser;
     TelemetryManager telemetry;
-    AsyncManager async_pool(4); // Пул воркеров
+    
+    // Динамический пул воркеров
+    size_t pool_size = std::thread::hardware_concurrency();
+    AsyncManager async_pool(pool_size > 0 ? pool_size : 4); 
 
-    // Интеграция движка
     async_pool.db_engine = [&](const std::string& query, std::function<void(const std::string&)> output_cb) {
-        // Здесь мы передаем телеметрии данные об успехе/ошибке
         auto start = std::chrono::high_resolution_clock::now();
-        
-        // Вызов парсера (Даша должна добавить поддержку output_cb)
         Result res = parser.process(query, hm, output_cb); 
-        
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         
         telemetry.recordQuery(duration, !res.isOk());
         Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", duration);
-        
         return res;
     };
 
     // 3. ПОДГОТОВКА СЕТИ
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("[CRITICAL] Socket fail");
-        return EXIT_FAILURE;
-    }
+    if (server_fd < 0) { perror("[CRITICAL] Socket fail"); return EXIT_FAILURE; }
 
     int socket_opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &socket_opt, sizeof(socket_opt));
-
-    if (!set_fd_nonblocking(server_fd)) {
-        perror("[CRITICAL] Non-blocking fail");
-        return EXIT_FAILURE;
-    }
+    set_fd_nonblocking(server_fd);
 
     struct sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
@@ -91,55 +80,37 @@ int main() {
         perror("[CRITICAL] Bind fail");
         return EXIT_FAILURE;
     }
-
     listen(server_fd, SOMAXCONN);
 
-    // 4. ИНИЦИАЛИЗАЦИЯ ТАБЛИЦЫ POLL
     std::vector<pollfd> poll_fds;
     poll_fds.push_back({server_fd, POLLIN, 0});
 
-    std::cout << ">>> DBMS SERVER ONLINE (Non-blocking Mode) <<<" << std::endl;
+    std::cout << ">>> DBMS SERVER ONLINE (Pool: " << pool_size << " threads) <<<" << std::endl;
 
-    // 5. EVENT LOOP (Главный поток)
+    // 4. EVENT LOOP
     while (g_keep_running) {
-        // Таймаут 1000мс позволяет циклу проверять g_keep_running раз в секунду
-        int poll_result = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), 1000);
+        int poll_result = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), POLL_TIMEOUT_MS);
         
         if (poll_result < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
-        if (poll_result == 0) continue; 
-
         for (size_t i = 0; i < poll_fds.size(); ++i) {
             if (!(poll_fds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
 
-            // НОВОЕ СОЕДИНЕНИЕ
             if (poll_fds[i].fd == server_fd) {
                 while (true) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
                     int client_sock = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+                    if (client_sock < 0) break;
                     
-                    if (client_sock < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        break;
-                    }
-
-                    if (set_fd_nonblocking(client_sock)) {
-                        poll_fds.push_back({client_sock, POLLIN, 0});
-                        std::clog << "[Network] Accepted FD: " << client_sock << std::endl;
-                    } else {
-                        close(client_sock);
-                    }
+                    set_fd_nonblocking(client_sock);
+                    poll_fds.push_back({client_sock, POLLIN, 0});
                 }
-            } 
-            // ДАННЫЕ ОТ КЛИЕНТА
-            else {
+            } else {
                 int client_fd = poll_fds[i].fd;
-                
-                // 1. СРАЗУ читаем весь запрос в главном потоке
                 std::string query = NetworkManager::receiveString(client_fd);
                 
                 if (query.empty()) {
@@ -149,37 +120,26 @@ int main() {
                     continue;
                 }
 
-                // 2. Логика асинхронности (Задание 6)
-                if (query.substr(0, 6) == "CHECK ") {
-                    std::string guid = query.substr(6);
-                    // Убираем ';' если пришел запрос "CHECK guid;"
+                // Логика асинхронности через команду CHECK
+                if (query.substr(0, std::string(CMD_CHECK).size()) == CMD_CHECK) {
+                    std::string guid = query.substr(std::string(CMD_CHECK).size());
                     if (!guid.empty() && guid.back() == ';') guid.pop_back();
                     
                     auto res = async_pool.fetch_result(guid);
                     NetworkManager::sendString(client_fd, res.data.empty() ? "Processing..." : res.data);
-                } 
-                else {
-                    // Генерируем GUID и ставим задачу в очередь
+                } else {
                     std::string guid = async_pool.enqueue(query);
-                    // Мгновенно отвечаем клиенту
                     NetworkManager::sendString(client_fd, "ASYNC_ID: " + guid);
                     NetworkManager::sendString(client_fd, "EOF_MARKER");
                 }
 
-                // 3. Закрываем сокет, так как мы ответили (или поставили задачу)
                 close(client_fd);
                 poll_fds.erase(poll_fds.begin() + i);
                 i--;
             }
         }
-
-        // Периодический вывод телеметрии в лог сервера (раз в 30 секунд или по событию)
-        // telemetry.printMetrics(); 
     }
 
-    // 6. ЗАВЕРШЕНИЕ
-    std::cout << "[System] Closing server..." << std::endl;
     for (const auto& entry : poll_fds) close(entry.fd);
-    
     return EXIT_SUCCESS;
 }

@@ -30,6 +30,7 @@ include_directories(
 # --- 3. СБОРКА БИБЛИОТЕКИ ---
 set(DB_LIB_SOURCES
     api/src/SQLParser.cpp
+    api/src/AsyncManager.cpp
     core/src/HierarchyManager.cpp
     core/src/Pager.cpp
     logic/src/TableManager.cpp
@@ -39,6 +40,10 @@ set(DB_LIB_SOURCES
     logger/src/TelemetryManager.cpp
 )
 add_library(db_logic STATIC ${DB_LIB_SOURCES})
+
+# Потоки обязательны для AsyncManager
+find_package(Threads REQUIRED)
+target_link_libraries(db_logic PUBLIC Threads::Threads)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(FS_LIB "")
@@ -61,9 +66,9 @@ include(GoogleTest)
 gtest_discover_tests(unit_tests)
 
 # --- СЕРВЕР ---
-add_executable(db_server modules/api/src/ServerApp.cpp)
+add_executable(db_server api/src/ServerApp.cpp)
 target_link_libraries(db_server db_logic ${FS_LIB})
 
 # --- КЛИЕНТ ---
-add_executable(db_client modules/api/src/ClientApp.cpp)
+add_executable(db_client api/src/ClientApp.cpp)
 target_link_libraries(db_client db_logic ${FS_LIB})

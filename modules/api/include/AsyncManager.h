@@ -56,7 +56,7 @@ public:
     using Processor = std::function<Result(const std::string&, std::function<void(const std::string&)>)>;
     Processor db_engine;
 
-    explicit AsyncManager(size_t threads = 4);
+    explicit AsyncManager(size_t threads = 0);
     ~AsyncManager();
 
     // Запрет копирования и перемещения (AsyncManager — уникальный ресурс сервера)

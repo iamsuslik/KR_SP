@@ -3,10 +3,20 @@
 #include <shared_mutex>
 #include <deque>
 
+static constexpr size_t DEFAULT_THREADS = 4;
+static constexpr size_t MAX_THREADS = 16;
+static constexpr size_t MAX_REGISTRY_SIZE = 1000;
+
 static std::shared_mutex registry_mtx;
-static std::deque<std::string> history_fifo; // Для строгого соблюдения FIFO при очистке
+static std::deque<std::string> history_fifo;
 
 AsyncManager::AsyncManager(size_t threads) {
+    if (threads == 0) {
+        threads = std::thread::hardware_concurrency();
+        if (threads == 0) threads = DEFAULT_THREADS;
+        else if (threads > MAX_THREADS) threads = MAX_THREADS; 
+    }
+
     pool.reserve(threads);
     for (size_t i = 0; i < threads; ++i) pool.emplace_back(&AsyncManager::worker_loop, this);
 }
@@ -31,7 +41,7 @@ std::string AsyncManager::enqueue(const std::string& query) {
     std::string guid = generate_guid_v4();
     {
         std::unique_lock lock(registry_mtx);
-        if (registry.size() >= 1000) {
+        if (registry.size() >= MAX_REGISTRY_SIZE) {
             registry.erase(history_fifo.front());
             history_fifo.pop_front();
         }

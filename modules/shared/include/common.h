@@ -149,6 +149,8 @@ enum class StatusCode {
     // Синтаксис
     SYNTAX_ERROR,
     INTERNAL_ERROR
+
+    TASK_PENDING,   // Когда сервер получил запрос, но еще не посчитал (для асинхронности)
 };
 
 struct [[nodiscard]] Result {
