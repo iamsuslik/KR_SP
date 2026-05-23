@@ -18,39 +18,26 @@ std::string SQLParser::toUpper(std::string s) {
     return s;
 }
 
-// bool SQLParser::isValidCase(const std::string& token) {
-//     if (token.empty() || token[0] == '"') return true;
-//     bool hasUpper = false, hasLower = false;
-//     for (char c : token) {
-//         if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
-//         if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
-//     }
-//     return !(hasUpper && hasLower);
-// }
 
 Value SQLParser::parseLiteral(const std::string& token) const{
     if (token.empty()) return Value();
-    
-    // Если это строка в кавычках
+
     if (token.size() >= 2 && token.front() == '"' && token.back() == '"') {
         return Value(token.substr(1, token.size() - 2));
     }
-    
-    // Попытка распарсить как число
+
     try {
         size_t pos;
         int val = std::stoi(token, &pos);
         if (pos == token.size()) return Value(val);
     } catch (...) {
-        // Если stoi упал, значит это не число. 
-        // В зависимости от контекста это либо идентификатор, либо ошибка.
+        
     }
 
     return Value(token);
 }
 
 bool SQLParser::isValidIdentifier(const std::string& name) {
-    // Регулярки — это хорошо, но можно добавить проверку на длину (ТЗ: имена ограничены)
     if (name.empty() || name.size() > MAX_NAME_LEN) return false;
     
     static const std::regex pattern("^[a-zA-Z_][a-zA-Z0-9_]*$");
@@ -60,25 +47,23 @@ bool SQLParser::isValidIdentifier(const std::string& name) {
 int SQLParser::getPrecedence(const std::string& op) {
     if (op == "OR") return 1;
     if (op == "AND") return 2;
-    // Все операторы сравнения имеют одинаковый приоритет
     if (op == "=" || op == "==" || op == ">" || op == "<" || op == "!=" || op == ">=" || op == "<=" || op == "LIKE") return 3;
     return 0;
 }
 
-// ВСПОМОГАТЕЛЬНЫЙ МЕТОД: Создание листа дерева (операнда)
+// Создание листа дерева (операнда)
 std::shared_ptr<ExpressionNode> SQLParser::createLeaf(const std::string& token) {
     auto leaf = std::make_shared<ExpressionNode>();
     leaf->is_op = false;
     
     Value parsed = parseLiteral(token);
-    // Сохраняем имя колонки или строковое представление значения
     leaf->column = (parsed.type == DataType::STR) ? parsed.str_val : std::to_string(parsed.int_val);
     return leaf;
 }
 
-// ВСПОМОГАТЕЛЬНЫЙ МЕТОД: Связывание оператора с операндами
+
 void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& values, std::stack<std::string>& ops) {
-    if (ops.empty() || values.size() < 2) return; // Защита от кривого SQL
+    if (ops.empty() || values.size() < 2) return; 
     
     std::string op = ops.top(); ops.pop();
     auto right = values.top(); values.pop();
@@ -92,16 +77,15 @@ void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& value
         node->left = left;
         node->right = right;
     } else {
-        // Логика сравнения (age = 20)
         node->is_op = false;
-        node->column = left->column; // Слева — имя колонки
-        node->val1 = right->column;  // Справа — значение
-        node->val1_parsed = parseLiteral(right->column); // Сразу парсим для движка БД
+        node->column = left->column;
+        node->val1 = right->column; 
+        node->val1_parsed = parseLiteral(right->column); 
     }
     values.push(node);
 }
 
-// ОСНОВНОЙ МЕТОД: Построение дерева
+// Построение дерева
 std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(const std::vector<std::string>& tokens) {
     if (tokens.empty()) return nullptr;
 
@@ -120,22 +104,19 @@ std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(const std::vector
             while (!ops.empty() && ops.top() != "(") {
                 applyOperator(values, ops);
             }
-            if (!ops.empty()) ops.pop(); // Выбрасываем открывающую скобку
+            if (!ops.empty()) ops.pop(); 
         } 
         else if (getPrecedence(upToken) > 0) {
-            // Если приоритет текущего оператора ниже или равен тому, что в стеке — выполняем старые
             while (!ops.empty() && ops.top() != "(" && getPrecedence(ops.top()) >= getPrecedence(upToken)) {
                 applyOperator(values, ops);
             }
             ops.push(upToken);
         } 
         else {
-            // Это операнд (колонка или число/строка)
             values.push(createLeaf(token));
         }
     }
 
-    // Довыполняем всё, что осталось в стеке
     while (!ops.empty()) {
         if (ops.top() == "(") { ops.pop(); continue; } // Защита от лишних скобок
         applyOperator(values, ops);
@@ -149,7 +130,6 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) const {
     std::string current;
     bool inQuotes = false;
 
-    // Лямбда для "сброса" текущего слова в список токенов
     auto pushCurrent = [&]() {
         if (!current.empty()) {
             tokens.push_back(current);
@@ -160,54 +140,47 @@ std::vector<std::string> SQLParser::tokenize(const std::string& query) const {
     for (size_t i = 0; i < query.length(); ++i) {
         char c = query[i];
         
-        // 1. Работа с кавычками (строковые литералы)
         if (c == '"') {
             inQuotes = !inQuotes;
             current += c;
-            if (!inQuotes) pushCurrent(); // Кавычка закрылась — токен готов
+            if (!inQuotes) pushCurrent(); 
             continue;
         }
 
-        // Если мы внутри кавычек, просто копируем всё подряд
         if (inQuotes) {
             current += c;
             continue;
         }
 
-        // 2. Работа с разделителями
         if (std::isspace(static_cast<unsigned char>(c))) {
             pushCurrent();
         } 
         else if (c == ',' || c == '(' || c == ')' || c == ';') {
             pushCurrent();
-            // Точку с запятой обычно не добавляют в токены, она просто маркер конца
             if (c != ';') {
                 tokens.push_back(std::string(1, c));
             }
         } 
-        // 3. Работа с операторами (включая составные ==, !=, <=, >=)
         else if (c == '=' || c == '<' || c == '>' || c == '!') {
             pushCurrent();
             std::string op(1, c);
             
-            // Заглядываем вперед: не идет ли следом '='?
             if (i + 1 < query.length() && query[i + 1] == '=') { 
                 op += "="; 
-                i++; // Пропускаем следующий символ, так как он уже часть оператора
+                i++; 
             }
             tokens.push_back(op);
         } 
-        // 4. Обычные символы (имена таблиц, колонок, ключевые слова)
         else {
             current += c;
         }
     }
     
-    pushCurrent(); // Не забываем последний токен
+    pushCurrent(); 
     return tokens;
 }
 
-// 1. Помощник для проверки регистра (вынесли из основного метода)
+// для проверки регистра 
 Result SQLParser::validateTokenCase(const std::vector<std::string>& tokens, OutputCallback callback) {
     for (const auto& t : tokens) {
         if (t.empty() || t.front() == '"') continue;
@@ -228,65 +201,73 @@ Result SQLParser::validateTokenCase(const std::vector<std::string>& tokens, Outp
     return Result::Success();
 }
 
-// 2. Вынесли логику DROP, чтобы не раздувать основной метод
+// логика DROP
 Result SQLParser::handleDrop(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
     if (tokens.size() < 3) {
         return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete DROP command");
     }
 
     std::string sub = toUpper(tokens[1]);
-    Result final_res;
+    Result final_res; 
 
-    if (sub == "TABLE") {
-        auto res = hm.resolveTablePath(tokens[2]);
-        if (!res.isOk()) {
-            callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-            return res;
+    try {
+        if (sub == "TABLE") {
+            auto res = hm.resolveTablePath(tokens[2]);
+            res.throw_if_error();  
+            
+            final_res = TableManager::dropTable(res.path);
+        } 
+        else if (sub == "DATABASE") {
+            final_res = hm.dropDatabase(tokens[2]);
+        } 
+        else {
+            return Result::Error(StatusCode::SYNTAX_ERROR, "Unknown DROP target: " + sub);
         }
-        final_res = TableManager::dropTable(res.path);
-    } 
-    else if (sub == "DATABASE") {
-        final_res = hm.dropDatabase(tokens[2]);
-    } 
-    else {
-        return Result::Error(StatusCode::SYNTAX_ERROR, "Unknown DROP target: " + sub);
-    }
 
-    callback(final_res.isOk() ? "[Success] " + final_res.details + "\n" : "[Error] " + ErrorUtils::formatMessage(final_res) + "\n");
-    return final_res;
+        final_res.throw_if_error();
+        
+        callback("[Success] " + final_res.details + "\n");
+        return final_res;
+        
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
-// 3. ОБНОВЛЕННЫЙ ОСНОВНОЙ МЕТОД
+
 Result SQLParser::process(const std::string& query, HierarchyManager& hm, OutputCallback callback) {
-    auto tokens = tokenize(query);
-    if (tokens.empty()) return Result::Success();
-    if (tokens[0].front() == '[') return Result::Success(); // Игнорируем комментарии
+    try {
+        auto tokens = tokenize(query);
+        if (tokens.empty()) return Result::Success();
+        if (tokens[0].front() == '[') return Result::Success(); 
 
-    // Шаг 1: Валидация регистра
-    Result case_res = validateTokenCase(tokens, callback);
-    if (!case_res.isOk()) return case_res;
+        validateTokenCase(tokens, callback).throw_if_error();
 
-    std::string cmd = toUpper(tokens[0]);
+        std::string cmd = toUpper(tokens[0]);
 
-    // Шаг 2: Чистая диспетчеризация
-    if (cmd == "CREATE") {
-        if (tokens.size() < 2) return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete CREATE");
-        std::string sub = toUpper(tokens[1]);
-        if (sub == "DATABASE") return handleCreateDatabase(tokens, hm, callback);
-        if (sub == "TABLE")    return handleCreateTable(tokens, hm, callback);
+        if (cmd == "CREATE") {
+            if (tokens.size() < 2) return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete CREATE");
+            std::string sub = toUpper(tokens[1]);
+            if (sub == "DATABASE") return handleCreateDatabase(tokens, hm, callback);
+            if (sub == "TABLE")    return handleCreateTable(tokens, hm, callback);
+        }
+        
+        if (cmd == "USE")    return handleUse(tokens, hm, callback);
+        if (cmd == "INSERT") return handleInsert(tokens, hm, callback);
+        if (cmd == "SELECT") return handleSelect(tokens, hm, callback);
+        if (cmd == "DELETE") return handleDelete(tokens, hm, callback);
+        if (cmd == "UPDATE") return handleUpdate(tokens, hm, callback);
+        if (cmd == "DROP")   return handleDrop(tokens, hm, callback);
+
+        std::string err = "[Error] Unknown command: " + tokens[0] + "\n";
+        callback(err);
+        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+
+    } catch (const DbException& e) {
+        return Result::Error(e.code(), e.what());
     }
-    
-    if (cmd == "USE")    return handleUse(tokens, hm, callback);
-    if (cmd == "INSERT") return handleInsert(tokens, hm, callback);
-    if (cmd == "SELECT") return handleSelect(tokens, hm, callback);
-    if (cmd == "DELETE") return handleDelete(tokens, hm, callback);
-    if (cmd == "UPDATE") return handleUpdate(tokens, hm, callback);
-    if (cmd == "DROP")   return handleDrop(tokens, hm, callback);
-
-    // Если ничего не подошло
-    std::string err = "[Error] Unknown command: " + tokens[0] + "\n";
-    callback(err);
-    return Result::Error(StatusCode::SYNTAX_ERROR, err);
 }
 
 // Вспомогательный метод для выделения токенов после WHERE
@@ -306,16 +287,18 @@ Result SQLParser::handleCreateDatabase(const std::vector<std::string>& tokens, H
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // Вызываем логику создания БД
-    Result res = hm.createDatabase(tokens[2]);
-    
-    if (res.isOk()) {
-        callback("[Success] " + res.details + "\n");
-    } else {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-    }
+    try {
+        Result res = hm.createDatabase(tokens[2]);
+        res.throw_if_error(); 
 
-    return res; // Теперь Даша узнает, создалась ли папка на диске
+        callback("[Success] " + res.details + "\n");
+        return res;
+
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
 Result SQLParser::handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
@@ -325,20 +308,21 @@ Result SQLParser::handleUse(const std::vector<std::string>& tokens, HierarchyMan
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // Переключаем контекст в HierarchyManager
-    Result res = hm.useDatabase(tokens[1]);
-    
-    if (res.isOk()) {
-        callback("[Success] " + res.details + "\n");
-    } else {
-        // Если БД не существует, HierarchyManager вернет DATABASE_NOT_FOUND
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-    }
+    try {
+        Result res = hm.useDatabase(tokens[1]);
+        res.throw_if_error();
 
-    return res;
+        callback("[Success] " + res.details + "\n");
+        return res;
+
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
-// ВСПОМОГАТЕЛЬНЫЙ МЕТОД: Парсинг списка колонок (col type flags, ...)
+// Парсинг списка колонок (col type flags, ...)
 Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens, size_t& i, std::vector<ColumnDef>& outCols) {
     while (i < tokens.size() && tokens[i] != ")") {
         if (i + 1 >= tokens.size()) return Result::Error(StatusCode::SYNTAX_ERROR, "Unexpected end of column list");
@@ -374,7 +358,6 @@ Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens,
     return Result::Success();
 }
 
-// ОСНОВНОЙ МЕТОД
 Result SQLParser::handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
     if (tokens.size() < 6) {
         std::string err = "[Error] Syntax error. Expected: CREATE TABLE table_name (col1 type [flags], ...);\n";
@@ -382,42 +365,38 @@ Result SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hier
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    std::string tableName = tokens[2];
-    Result res = hm.resolveTablePath(tableName);
+    try {
+        std::string tableName = tokens[2];
+        Result res = hm.resolveTablePath(tableName);
 
-    // 1. Проверка контекста базы данных
-    if (res.code == StatusCode::DATABASE_NOT_FOUND) {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-        return res;
-    }
+        if (res.code == StatusCode::DATABASE_NOT_FOUND) {
+            res.throw_if_error();
+        }
 
-    // 2. Проверка существования таблицы
-    if (res.isOk()) {
-        std::string err = "Table '" + tableName + "' already exists.\n";
-        callback("[Error] " + err);
-        return Result::Error(StatusCode::ALREADY_EXISTS, err); 
-    }
+        if (res.isOk()) {
+            throw DbException(StatusCode::ALREADY_EXISTS, "Table '" + tableName + "' already exists.");
+        }
 
-    // 3. Парсинг схемы (используем наш новый метод)
-    std::vector<ColumnDef> cols;
-    size_t index = 4; // Сразу после '('
-    Result parse_res = parseColumnDefinitions(tokens, index, cols);
-    
-    if (!parse_res.isOk()) {
-        callback("[Error] " + parse_res.details + "\n");
-        return parse_res;
-    }
+        std::vector<ColumnDef> cols;
+        size_t index = 4; // Сразу после '('
+        parseColumnDefinitions(tokens, index, cols).throw_if_error();
 
-    // 4. Физическое создание таблицы через движок
-    Result create_res = TableManager::createTable(res.path, TableSchema(tableName, cols));
-    
-    if (create_res.isOk()) {
+        Result create_res = TableManager::createTable(res.path, TableSchema(tableName, cols));
+        create_res.throw_if_error();
+        
         callback("[Success] Table '" + tableName + "' created successfully.\n");
-    } else {
-        callback("[Error] " + ErrorUtils::formatMessage(create_res) + "\n");
-    }
+        return create_res;
 
-    return create_res;
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        
+        if (e.code() == StatusCode::ALREADY_EXISTS || e.code() == StatusCode::SYNTAX_ERROR) {
+            callback("[Error] " + std::string(e.what()) + "\n");
+        } else {
+            callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        }
+        return err_res;
+    }
 }
 
 Result SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
@@ -427,47 +406,45 @@ Result SQLParser::handleInsert(const std::vector<std::string>& tokens, Hierarchy
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // 1. Находим путь к таблице
-    Result res = hm.resolveTablePath(tokens[2]);
-    if (!res.isOk()) {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-        return res;
-    }
+    try {
+        Result res = hm.resolveTablePath(tokens[2]);
+        res.throw_if_error();
 
-    // 2. Читаем заголовок таблицы с диска
-    TableHeader header;
-    Result page_res = Pager(res.path).read_page(0, &header);
-    if (!page_res.isOk()) {
-        callback("[Error] Failed to read table schema from disk.\n");
-        return page_res; // Возвращаем IO_ERROR
-    }
+        TableHeader header;
+        try {
+            Pager(res.path).read_page(0, &header).throw_if_error();
+        } catch (...) {
+            throw DbException(StatusCode::IO_ERROR, "Failed to read table schema from disk.");
+        }
 
-    // 3. Выделяем колонки и значения из токенов
-    std::vector<std::string> targetCols;
-    size_t valStart = findValueStartIndex(tokens, targetCols);
-    auto rawValues = collectValuesFromTokens(tokens, valStart);
+        std::vector<std::string> targetCols;
+        size_t valStart = findValueStartIndex(tokens, targetCols);
+        auto rawValues = collectValuesFromTokens(tokens, valStart);
 
-    // 4. Подготавливаем объект Row и проверяем констрейнты
-    Row finalRow(header.column_count, Value());
+        Row finalRow(header.column_count, Value());
 
-    // Если валидация не прошла (например, нарушение NOT_NULL)
-    if (!prepareAndValidateRow(finalRow, header, targetCols, rawValues, callback)) {
-        // prepareAndValidateRow уже вывел текст ошибки через callback
-        return Result::Error(StatusCode::INVALID_VALUE, "Row validation failed");
-    }
-        
-    // 5. Пытаемся физически вставить строку через движок
-    Result insert_res = TableManager::insertRow(res.path, finalRow);
-    
-    if (insert_res.isOk()) {
+        if (!prepareAndValidateRow(finalRow, header, targetCols, rawValues, callback)) {
+            return Result::Error(StatusCode::INVALID_VALUE, "Row validation failed");
+        }
+            
+        Result insert_res = TableManager::insertRow(res.path, finalRow);
+        insert_res.throw_if_error();
+
         callback("[Success] " + insert_res.details + "\n");
-    } else {
-        callback("[Error] " + ErrorUtils::formatMessage(insert_res) + "\n");
-    }
+        return insert_res;
 
-    return insert_res;
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        if (e.code() == StatusCode::IO_ERROR) {
+            callback("[Error] " + std::string(e.what()) + "\n");
+        } else {
+            callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        }
+        return err_res;
+    }
 }
-// 1. Помощник для поиска ключевых слов
+
+// Помощник для поиска ключевых слов
 size_t SQLParser::findKeyword(const std::vector<std::string>& tokens, const std::string& keyword) {
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (toUpper(tokens[i]) == keyword) return i;
@@ -475,7 +452,7 @@ size_t SQLParser::findKeyword(const std::vector<std::string>& tokens, const std:
     return std::string::npos;
 }
 
-// 2. Вынесли логику парсинга колонок, агрегатов и алиасов
+// логика парсинга колонок, агрегатов и алиасов
 Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t fromIdx, 
                                  std::vector<std::string>& selectedCols, 
                                  std::vector<AggregateRequest>& aggs, 
@@ -511,9 +488,8 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
     return Result::Success();
 }
 
-// 3. ОСНОВНОЙ МЕТОД
 Result SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    // Шаг 1: Ищем FROM
+
     size_t fromIdx = findKeyword(tokens, "FROM");
     if (fromIdx == std::string::npos || fromIdx + 1 >= tokens.size()) {
         std::string err = "[Error] Syntax error. Expected FROM [table_name]\n";
@@ -526,111 +502,93 @@ Result SQLParser::handleSelect(const std::vector<std::string>& tokens, Hierarchy
     std::vector<AggregateRequest> aggs;
     std::map<std::string, std::string> aliases;
 
-    // Шаг 2: Парсим то, ЧТО выбираем
-    Result proj_res = parseProjection(tokens, fromIdx, selectedCols, aggs, aliases);
-    if (!proj_res.isOk()) return proj_res;
+    try {
+        parseProjection(tokens, fromIdx, selectedCols, aggs, aliases).throw_if_error();
 
-    // Шаг 3: Разрешаем путь к таблице
-    auto res = hm.resolveTablePath(tableName);
-    if (!res.isOk()) {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-        return res;
-    }
+        auto res = hm.resolveTablePath(tableName);
+        res.throw_if_error();
 
-    // Шаг 4: Строим дерево условий WHERE
-    auto whereTokens = getWhereTokens(tokens);
-    auto tree = buildExpressionTree(whereTokens);
+        auto whereTokens = getWhereTokens(tokens);
+        auto tree = buildExpressionTree(whereTokens);
     
-    // Шаг 5: Выполняем через движок
-    Result select_res = TableManager::executeSelect(res.path, tree.get(), selectedCols, aliases, aggs, callback);
-    
-    if (!select_res.isOk()) {
-        callback("[Error] " + ErrorUtils::formatMessage(select_res) + "\n");
-    }
+        Result select_res = TableManager::executeSelect(res.path, tree.get(), selectedCols, aliases, aggs, callback);
+        select_res.throw_if_error();
+        
+        return select_res;
 
-    return select_res;
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
 Result SQLParser::handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    // 1. Проверка синтаксиса: DELETE FROM [table_name]
-    // Мы проверяем не только количество, но и наличие слова FROM
+
     if (tokens.size() < 3 || toUpper(tokens[1]) != "FROM") {
         std::string err = "[Error] Syntax error. Expected: DELETE FROM [table_name] <WHERE condition>;\n";
         callback(err);
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // 2. Пытаемся разрешить путь к таблице (токен под индексом 2)
-    auto res = hm.resolveTablePath(tokens[2]);
-    if (!res.isOk()) {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-        return res;
-    }
+    try {
+        auto res = hm.resolveTablePath(tokens[2]);
+        res.throw_if_error();
 
-    // 3. Работа с условиями
-    // Выделяем токены после слова WHERE и строим абстрактное дерево условий
-    auto whereTokens = getWhereTokens(tokens);
-    auto tree = buildExpressionTree(whereTokens);
+        auto whereTokens = getWhereTokens(tokens);
+        auto tree = buildExpressionTree(whereTokens);
 
-    // 4. Вызываем движок для физического удаления записей
-    Result del_res = TableManager::executeDelete(res.path, tree.get());
+        Result del_res = TableManager::executeDelete(res.path, tree.get());
+        del_res.throw_if_error();
 
-    // 5. Формируем ответ пользователю
-    if (del_res.isOk()) {
         callback("[Success] " + del_res.details + "\n");
-    } else {
-        callback("[Error] " + ErrorUtils::formatMessage(del_res) + "\n");
-    }
+        return del_res;
 
-    return del_res;
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
 Result SQLParser::handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    // 1. Проверка синтаксиса: UPDATE [table] SET [col] = [val] <WHERE ...>
-    // Проверяем наличие ключевого слова SET на правильной позиции (индекс 2)
+    // Проверка синтаксиса: UPDATE [table] SET [col] = [val] <WHERE ...>
     if (tokens.size() < 6 || toUpper(tokens[2]) != "SET") {
         std::string err = "[Error] Syntax error. Expected: UPDATE [table] SET [col] = [val] <WHERE condition>;\n";
         callback(err);
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // 2. Проверка оператора присваивания в блоке SET
     if (tokens[4] != "=") {
         std::string err = "[Error] Syntax error. Expected '=' after column name in SET clause.\n";
         callback(err);
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
 
-    // 3. Разрешаем путь к таблице (токен под индексом 1)
-    auto res = hm.resolveTablePath(tokens[1]);
-    if (!res.isOk()) {
-        callback("[Error] " + ErrorUtils::formatMessage(res) + "\n");
-        return res;
-    }
+    try {
+        auto res = hm.resolveTablePath(tokens[1]);
+        res.throw_if_error();
 
-    // 4. Извлекаем условия фильтрации после слова WHERE
-    auto whereTokens = getWhereTokens(tokens);
-    auto tree = buildExpressionTree(whereTokens);
+        auto whereTokens = getWhereTokens(tokens);
+        auto tree = buildExpressionTree(whereTokens);
 
-    // 5. Вызываем движок для обновления данных. 
-    // Логика: tokens[3] - имя колонки, tokens[5] - новое значение.
-    Result upd_res = TableManager::executeUpdate(res.path, tree.get(), tokens[3], tokens[5]);
+        Result upd_res = TableManager::executeUpdate(res.path, tree.get(), tokens[3], tokens[5]);
+        upd_res.throw_if_error();
 
-    // 6. Формируем ответ
-    if (upd_res.isOk()) {
         callback("[Success] " + upd_res.details + "\n");
-    } else {
-        callback("[Error] " + ErrorUtils::formatMessage(upd_res) + "\n");
-    }
+        return upd_res;
 
-    return upd_res;
+    } catch (const DbException& e) {
+        Result err_res = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
+        return err_res;
+    }
 }
 
-// 1. Поиск индекса, где начинаются сами значения (после слова VALUE)
+//  Поиск индекса, где начинаются сами значения (после слова VALUE)
 size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, std::vector<std::string>& outColNames) const {
     size_t i = 3; // Начинаем после "INSERT INTO table_name"
 
-    // Обработка списка колонок: (col1, col2, ...)
     if (i < tokens.size() && tokens[i] == "(") {
         i++; // Пропускаем открывающую скобку
         while (i < tokens.size() && tokens[i] != ")") {
@@ -642,30 +600,25 @@ size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, st
         if (i < tokens.size()) i++; // Пропускаем закрывающую скобку
     }
 
-    // Ищем ключевое слово VALUE (пропускаем всё до него)
     while (i < tokens.size() && toUpper(tokens[i]) != "VALUE") {
         i++;
     }
     
-    // После слова VALUE должна идти открывающая скобка значений: VALUE ( v1, v2 )
-    // Поэтому возвращаем индекс элемента СРАЗУ после '('
     if (i + 1 < tokens.size() && tokens[i+1] == "(") {
         return i + 2; 
     }
 
-    return std::string::npos; // Возвращаем специальную метку "не найдено"
+    return std::string::npos; 
 }
 
-// 2. Сбор значений в массив строк
+// Сбор значений в массив строк
 std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<std::string>& tokens, size_t startIdx) const {
     std::vector<std::string> values;
     
-    // Если индекс невалиден (npos), возвращаем пустой массив
     if (startIdx == std::string::npos || startIdx >= tokens.size()) {
         return values;
     }
 
-    // Собираем токены, пока не встретим закрывающую скобку запроса
     for (size_t i = startIdx; i < tokens.size() && tokens[i] != ")"; ++i) {
         if (tokens[i] != ",") {
             values.push_back(tokens[i]);
@@ -674,7 +627,7 @@ std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<st
     return values;
 }
 
-// 1. Помощник: ищет порядковый номер колонки по её имени
+// Помощник: ищет порядковый номер колонки по её имени
 int SQLParser::findColumnIndex(const TableHeader& header, const std::string& colName) const {
     for (uint32_t c = 0; c < header.column_count; ++c) {
         if (std::string(header.columns[c].name) == colName) return (int)c;
@@ -682,15 +635,13 @@ int SQLParser::findColumnIndex(const TableHeader& header, const std::string& col
     return -1;
 }
 
-// 2. Помощник: проверяет NOT_NULL и подставляет DEFAULT (Задание №10)
+// Помощник: проверяет NOT_NULL и подставляет DEFAULT (Задание №10)
 bool SQLParser::applyConstraints(Row& row, const TableHeader& header, OutputCallback callback) const {
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (row[i].is_null) {
-            // Если есть значение по умолчанию — подставляем его
             if (header.columns[i].has_default) {
                 row[i] = parseLiteral(header.columns[i].default_val);
             } 
-            // Если дефолта нет, а колонка NOT_NULL — это ошибка
             else if (header.columns[i].is_not_null) {
                 callback("[Error] Constraint Violation: Column '" + std::string(header.columns[i].name) + "' is NOT_NULL.\n");
                 return false;
@@ -700,19 +651,17 @@ bool SQLParser::applyConstraints(Row& row, const TableHeader& header, OutputCall
     return true;
 }
 
-// 3. ОСНОВНОЙ МЕТОД
+// ОСНОВНОЙ МЕТОД
 bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header, 
                                      const std::vector<std::string>& targetCols, 
                                      const std::vector<std::string>& rawValues,
                                      OutputCallback callback) {
-    
-    // Шаг 1: Проверка количества данных
+
     if (targetCols.empty() && rawValues.size() != header.column_count) {
         callback("[Error] Column count mismatch. Expected " + std::to_string(header.column_count) + " values.\n");
         return false;
     }
 
-    // Шаг 2: Маппинг данных в объект Row
     if (!targetCols.empty()) {
         // Случай: INSERT INTO (col1, col3) VALUE (val1, val3)
         for (size_t i = 0; i < targetCols.size() && i < rawValues.size(); ++i) {
@@ -731,6 +680,5 @@ bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header,
         }
     }
 
-    // Шаг 3: Применение констрейнтов (NOT NULL, DEFAULT)
     return applyConstraints(outRow, header, callback);
 }

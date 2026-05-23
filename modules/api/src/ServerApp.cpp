@@ -39,17 +39,14 @@ bool set_fd_nonblocking(int fd) {
 }
 
 int main() {
-    // 1. НАСТРОЙКА ОКРУЖЕНИЯ
     signal(SIGINT,  handle_shutdown_signal);
     signal(SIGTERM, handle_shutdown_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    // 2. ИНИЦИАЛИЗАЦИЯ КОМПОНЕНТОВ
     HierarchyManager hm;
     SQLParser parser;
     TelemetryManager telemetry;
     
-    // Динамический пул воркеров
     size_t pool_size = std::thread::hardware_concurrency();
     AsyncManager async_pool(pool_size > 0 ? pool_size : 4); 
 
@@ -64,7 +61,6 @@ int main() {
         return res;
     };
 
-    // 3. ПОДГОТОВКА СЕТИ
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) { perror("[CRITICAL] Socket fail"); return EXIT_FAILURE; }
 
@@ -88,7 +84,6 @@ int main() {
 
     std::cout << ">>> DBMS SERVER ONLINE (Pool: " << pool_size << " threads) <<<" << std::endl;
 
-    // 4. EVENT LOOP
     while (g_keep_running) {
         int poll_result = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), POLL_TIMEOUT_MS);
         

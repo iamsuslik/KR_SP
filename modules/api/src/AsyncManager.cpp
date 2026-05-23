@@ -71,7 +71,7 @@ void AsyncManager::worker_loop() {
     }
 }
 
-// ЭТАП 1: Безопасное извлечение задачи из очереди
+// Безопасное извлечение задачи из очереди
 bool AsyncManager::try_get_task(AsyncTask& task) {
     std::unique_lock<std::mutex> lock(queue_mtx);
     cv.wait(lock, [this] { return should_stop || !task_queue.empty(); });
@@ -83,12 +83,12 @@ bool AsyncManager::try_get_task(AsyncTask& task) {
     return true;
 }
 
-// ЭТАП 2: Чтение данных
+// Чтение данных
 std::string AsyncManager::get_query_text(const AsyncTask& task) {
     return task.query;
 }
 
-// ЭТАП 3: Выполнение логики БД и отправка ответа в сокет
+// ЭВыполнение логики БД и отправка ответа в сокет
 void AsyncManager::process_and_finalize(AsyncTask& task, const std::string& query) {
     std::string result_buffer;
     StatusCode sc = StatusCode::OK;
@@ -99,11 +99,10 @@ void AsyncManager::process_and_finalize(AsyncTask& task, const std::string& quer
         sc = db_engine(query, output_cb).code;
     }
 
-    // Просто обновляем реестр, чтобы клиент мог забрать результат по CHECK
     update_registry(task.guid, std::move(result_buffer), sc);
 }
 
-// ЭТАП 4: Обновление статуса и времени завершения
+// Обновление статуса и времени завершения
 void AsyncManager::update_registry(const std::string& guid, std::string buf, StatusCode sc) {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     char t_buf[26];
@@ -113,7 +112,7 @@ void AsyncManager::update_registry(const std::string& guid, std::string buf, Sta
         ctime_r(&now, t_buf);
     #endif
     std::string timestamp(t_buf);
-    if (!timestamp.empty()) timestamp.pop_back(); // Убираем \n от ctime
+    if (!timestamp.empty()) timestamp.pop_back(); 
 
     std::unique_lock lock(registry_mtx);
     if (registry.count(guid)) {

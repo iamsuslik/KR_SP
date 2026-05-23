@@ -81,16 +81,13 @@ void pollForResult(const std::string& guid) {
         std::string response = NetworkManager::receiveString(poll_sock);
         close(poll_sock);
 
-        // Если сервер ответил чем-то отличным от "в процессе", значит результат готов
         if (response != Protocol::STATUS_PENDING) {
-            // Очищаем строку спиннера
             std::cout << "\r" << std::string(Config::CLEANUP_WIDTH, ' ') << "\r"; 
             std::cout << CLR_INF << "[Result from " << guid << "]:" << CLR_RST << std::endl;
             std::cout << response << std::endl;
             return;
         }
 
-        // Анимация ожидания
         std::cout << "\r" << CLR_INF << "[Async] Processing " << spinner[s_idx++ % 4] << CLR_RST << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(Config::POLL_INTERVAL_MS));
     }
