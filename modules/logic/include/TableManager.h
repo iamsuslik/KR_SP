@@ -35,7 +35,7 @@ public:
     static Result insertRow(const std::string& full_path, const Row& row);
 
     static Result executeUpdate(const std::string& full_path, const ExpressionNode* cond,
-                                const std::string& targetCol, const std::string& newVal);
+        const std::vector<std::pair<std::string,std::string>>& assignments);
 
     static Result executeDelete(const std::string& full_path, const ExpressionNode* cond);
 
@@ -77,12 +77,12 @@ private:
 
     static void updateIndices(Pager& pager, TableHeader& header,
                               const Row& row, const RecordID& rid);
-
-    static void updateFieldAndIndex(Row& row, uint32_t colIdx,
-                                    const std::string& newVal,
-                                    TableHeader& header, Pager& pager,
-                                    RecordID rid, bool& header_changed);
-
+    
+    static void applyAssignments(Row& row,
+                             const std::vector<std::pair<std::string,std::string>>& assignments,
+                             TableHeader& header, Pager& pager,
+                             RecordID rid, bool& header_changed);
+                             
     static Result getRIDFromIndex(Pager& pager, TableHeader& header,
                                   const ExpressionNode* cond, RecordID& out_rid);
 
@@ -98,9 +98,8 @@ private:
                               const ExpressionNode* cond);
 
     static int fullScanUpdate(Pager& pager, TableHeader& header,
-                              const ExpressionNode* cond,
-                              const std::string& targetCol,
-                              const std::string& newVal);
+        const ExpressionNode* cond,
+        const std::vector<std::pair<std::string,std::string>>& assignments);
 
     static void clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row);
 
