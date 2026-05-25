@@ -7,28 +7,43 @@
 #include <cstring>
 #include <memory>
 
-// --- 1. Базовые константы ---
+
 constexpr int PAGE_SIZE = 4096;
 constexpr const int MAX_COLUMNS = 32;
 constexpr const int MAX_FREE_PAGES = 100;
 constexpr const int MAX_NAME_LEN = 32;
 constexpr const int TYPE_STR_SIZE = 64;
 constexpr const int TYPE_INT_SIZE = 4;
-constexpr const int ROW_METADATA_SIZE = sizeof(bool) + sizeof(uint16_t);
+
 constexpr const size_t PAGE_INTERNAL_RESERVE = 64;
 
-// --- 3. Физические структуры (бинарные) ---
+
 struct RecordID {
     uint32_t page_id;
     uint32_t slot_id;
 };
+
+#pragma pack(push, 1)
+
+struct PageHeader {
+    uint16_t slot_count;
+    uint16_t free_ptr;
+    uint16_t free_space;
+};
+
+
+struct Slot {
+    uint16_t offset;
+    uint16_t length;
+};
+#pragma pack(pop)
 
 template<typename T>
 constexpr size_t get_optimal_t() {
     return (PAGE_SIZE - PAGE_INTERNAL_RESERVE) / (2 * sizeof(std::pair<T, RecordID>));
 }
 
-// --- 2. Логические типы (ДОЛЖНЫ БЫТЬ ВЫШЕ ВСЕГО) ---
+
 enum class DataType { INT, STR };
 
 struct Value {
@@ -97,13 +112,15 @@ struct ColumnSchema {
     char default_val[TYPE_STR_SIZE];
 };
 
-constexpr size_t HEADER_DATA_SIZE = (sizeof(uint32_t) * 4) + (sizeof(uint32_t) * MAX_FREE_PAGES) + (sizeof(uint32_t) * MAX_COLUMNS) + (sizeof(ColumnSchema) * MAX_COLUMNS);
+constexpr size_t HEADER_DATA_SIZE = (sizeof(uint32_t) * 3) + 
+                                    (sizeof(uint32_t) * MAX_FREE_PAGES) + 
+                                    (sizeof(uint32_t) * MAX_COLUMNS) + 
+                                    (sizeof(ColumnSchema) * MAX_COLUMNS);
 constexpr size_t HEADER_PADDING_SIZE = PAGE_SIZE - HEADER_DATA_SIZE;
 
 struct TableHeader {
     uint32_t column_count;
-    uint32_t root_page_id; 
-    uint32_t row_size;
+    uint32_t root_page_id;
     uint32_t free_count;
     uint32_t free_list[MAX_FREE_PAGES];
     uint32_t root_page_ids[MAX_COLUMNS];
@@ -121,7 +138,7 @@ struct ExpressionNode {
     std::string op;
     std::string column;
     std::string val1;
-    Value val1_parsed; // Критически важно для Уровня 4
+    Value val1_parsed; 
     Value val2_parsed; 
     std::shared_ptr<ExpressionNode> left;
     std::shared_ptr<ExpressionNode> right;
@@ -129,45 +146,34 @@ struct ExpressionNode {
 
 enum class StatusCode {
     OK = 0,
-    // Системные ошибки
     IO_ERROR,
     NOT_FOUND,
     ALREADY_EXISTS,
     OUT_OF_MEMORY,
-    
-    // Ошибки СУБД (Валидация)
     TABLE_NOT_FOUND,
     DATABASE_NOT_FOUND,
     COLUMN_NOT_FOUND,
     TYPE_MISMATCH,
-    
-    // Ошибки данных (Констрейнты)
     DUPLICATE_KEY,
     NOT_NULL_VIOLATION,
     INVALID_VALUE,
-    
-    // Синтаксис
     SYNTAX_ERROR,
     INTERNAL_ERROR,
-
-    TASK_PENDING,   // Когда сервер получил запрос, но еще не посчитал (для асинхронности)
+    TASK_PENDING,
 };
 
 struct [[nodiscard]] Result {
     StatusCode code;
-    std::string details; // Дополнительная информация (например, имя проблемной колонки)
+    std::string details; 
     RecordID rid = {0, 0};
     std::string path = "";
 
-    // Вспомогательные методы для чистого кода
     bool isOk() const { return code == StatusCode::OK; }
     
     void throw_if_error() const {
         if (code != StatusCode::OK) {
-            throw DbException(code, details);
         }
     }
-    // Статические методы для удобного создания результатов
     static Result Success(RecordID r = {0,0}) { return {StatusCode::OK, "", r}; }
     static Result Error(StatusCode c, std::string d = "") { return {c, d}; }
 };
