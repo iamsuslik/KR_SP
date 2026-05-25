@@ -33,7 +33,8 @@ set(DB_LIB_SOURCES
     api/src/AsyncManager.cpp
     core/src/HierarchyManager.cpp
     core/src/Pager.cpp
-    logic/src/TableManager.cpp
+    logic/src/TableManager_Queries.cpp
+    logic/src/TableManager_Mutations.cpp
     logic/src/RecordManager.cpp
     logger/src/Logger.cpp
     shared/src/ErrorUtils.cpp
