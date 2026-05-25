@@ -1,5 +1,6 @@
 #include "SQLParser.h"
 #include "ErrorUtils.h"
+#include "DbException.h"
 #include "common.h"
 #include <map>
 #include <stdexcept>
@@ -13,8 +14,7 @@
 
 std::string SQLParser::toUpper(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { 
-        return std::toupper(c); 
-    });
+        return std::toupper(c); });
     return s;
 }
 
@@ -45,9 +45,11 @@ bool SQLParser::isValidIdentifier(const std::string& name) {
 }
 
 int SQLParser::getPrecedence(const std::string& op) {
-    if (op == "OR") return 1;
+    if (op == "OR")  return 1;
     if (op == "AND") return 2;
-    if (op == "=" || op == "==" || op == ">" || op == "<" || op == "!=" || op == ">=" || op == "<=" || op == "LIKE") return 3;
+    if (op == "=" || op == "==" || op == ">" || op == "<" ||
+        op == "!=" || op == ">=" || op == "<=" ||
+        op == "LIKE" || op == "BETWEEN") return 3;
     return 0;
 }
 
@@ -62,9 +64,10 @@ std::shared_ptr<ExpressionNode> SQLParser::createLeaf(const std::string& token) 
 }
 
 
-void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& values, std::stack<std::string>& ops) {
-    if (ops.empty() || values.size() < 2) return; 
-    
+void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& values,
+                               std::stack<std::string>& ops) {
+    if (ops.empty() || values.size() < 2) return;
+
     std::string op = ops.top(); ops.pop();
     auto right = values.top(); values.pop();
     auto left = values.top(); values.pop();
@@ -74,51 +77,72 @@ void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& value
 
     if (op == "AND" || op == "OR") {
         node->is_op = true;
-        node->left = left;
+        node->left  = left;
         node->right = right;
+    } else if (op == "BETWEEN") {
+        node->is_op = false;
+        node->column = left->column;
+        node->op = "BETWEEN";
+        node->val1_parsed = right->val1_parsed;
+        node->val2_parsed = right->val2_parsed;
     } else {
         node->is_op = false;
         node->column = left->column;
-        node->val1 = right->column; 
-        node->val1_parsed = parseLiteral(right->column); 
+        node->val1 = right->column;
+        node->val1_parsed = parseLiteral(right->column);
     }
     values.push(node);
 }
 
-// Построение дерева
-std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(const std::vector<std::string>& tokens) {
+std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(
+        const std::vector<std::string>& tokens) {
     if (tokens.empty()) return nullptr;
 
     std::stack<std::shared_ptr<ExpressionNode>> values;
     std::stack<std::string> ops;
 
-    for (const auto& token : tokens) {
-        if (token.empty()) continue;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].empty()) continue;
+        std::string upToken = toUpper(tokens[i]);
 
-        std::string upToken = toUpper(token);
-        
+        if (upToken == "BETWEEN") {
+            if (i + 3 < tokens.size() && toUpper(tokens[i + 2]) == "AND") {
+                Value lo = parseLiteral(tokens[i + 1]);
+                Value hi = parseLiteral(tokens[i + 3]);
+                i += 3;
+
+                if (values.empty()) continue;
+                auto col_leaf = values.top(); values.pop();
+
+                auto node = std::make_shared<ExpressionNode>();
+                node->is_op = false;
+                node->op = "BETWEEN";
+                node->column = col_leaf->column;
+                node->val1_parsed = lo;
+                node->val2_parsed = hi;
+                values.push(node);
+            }
+            continue;
+        }
+
         if (upToken == "(") {
             ops.push(upToken);
-        } 
-        else if (upToken == ")") {
-            while (!ops.empty() && ops.top() != "(") {
+        } else if (upToken == ")") {
+            while (!ops.empty() && ops.top() != "(")
                 applyOperator(values, ops);
-            }
-            if (!ops.empty()) ops.pop(); 
-        } 
-        else if (getPrecedence(upToken) > 0) {
-            while (!ops.empty() && ops.top() != "(" && getPrecedence(ops.top()) >= getPrecedence(upToken)) {
+            if (!ops.empty()) ops.pop();
+        } else if (getPrecedence(upToken) > 0) {
+            while (!ops.empty() && ops.top() != "(" &&
+                   getPrecedence(ops.top()) >= getPrecedence(upToken))
                 applyOperator(values, ops);
-            }
             ops.push(upToken);
-        } 
-        else {
-            values.push(createLeaf(token));
+        } else {
+            values.push(createLeaf(tokens[i]));
         }
     }
 
     while (!ops.empty()) {
-        if (ops.top() == "(") { ops.pop(); continue; } // Защита от лишних скобок
+        if (ops.top() == "(") { ops.pop(); continue; }
         applyOperator(values, ops);
     }
 
@@ -270,7 +294,6 @@ Result SQLParser::process(const std::string& query, HierarchyManager& hm, Output
     }
 }
 
-// Вспомогательный метод для выделения токенов после WHERE
 std::vector<std::string> SQLParser::getWhereTokens(const std::vector<std::string>& tokens) const {
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (toUpper(tokens[i]) == "WHERE") {
@@ -322,7 +345,6 @@ Result SQLParser::handleUse(const std::vector<std::string>& tokens, HierarchyMan
     }
 }
 
-// Парсинг списка колонок (col type flags, ...)
 Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens, size_t& i, std::vector<ColumnDef>& outCols) {
     while (i < tokens.size() && tokens[i] != ")") {
         if (i + 1 >= tokens.size()) return Result::Error(StatusCode::SYNTAX_ERROR, "Unexpected end of column list");
@@ -333,7 +355,6 @@ Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens,
         DataType type = (colTypeStr == "INT") ? DataType::INT : DataType::STR;
         ColumnDef cd(colName, type);
 
-        // Обработка модификаторов (INDEXED, NOT_NULL, DEFAULT)
         while (i < tokens.size() && tokens[i] != "," && tokens[i] != ")") {
             std::string flag = toUpper(tokens[i++]);
             
@@ -344,7 +365,7 @@ Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens,
             } else if (flag == "DEFAULT") {
                 cd.has_default = true;
                 if (i < tokens.size()) {
-                    cd.default_value = tokens[i++]; // Значение по умолчанию
+                    cd.default_value = tokens[i++];
                 }
             }
         }
@@ -352,7 +373,7 @@ Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens,
         outCols.push_back(cd);
 
         if (i < tokens.size() && tokens[i] == ",") {
-            i++; // Пропускаем запятую перед следующей колонкой
+            ++i;
         }
     }
     return Result::Success();
@@ -389,12 +410,7 @@ Result SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hier
 
     } catch (const DbException& e) {
         Result err_res = Result::Error(e.code(), e.what());
-        
-        if (e.code() == StatusCode::ALREADY_EXISTS || e.code() == StatusCode::SYNTAX_ERROR) {
-            callback("[Error] " + std::string(e.what()) + "\n");
-        } else {
-            callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        }
+        callback("[Error] " + std::string(e.what()) + "\n");
         return err_res;
     }
 }
@@ -435,16 +451,11 @@ Result SQLParser::handleInsert(const std::vector<std::string>& tokens, Hierarchy
 
     } catch (const DbException& e) {
         Result err_res = Result::Error(e.code(), e.what());
-        if (e.code() == StatusCode::IO_ERROR) {
-            callback("[Error] " + std::string(e.what()) + "\n");
-        } else {
-            callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        }
+        callback("[Error] " + ErrorUtils::formatMessage(err) + "\n");
         return err_res;
     }
 }
 
-// Помощник для поиска ключевых слов
 size_t SQLParser::findKeyword(const std::vector<std::string>& tokens, const std::string& keyword) {
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (toUpper(tokens[i]) == keyword) return i;
@@ -469,7 +480,8 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
                 AggregateType type = (token == "SUM") ? AggregateType::SUM : 
                                     (token == "COUNT") ? AggregateType::COUNT : AggregateType::AVG;
                 aggs.push_back({type, tokens[i+2]});
-                i += 3; continue;
+                i += 3; 
+                continue;
             }
         }
 
@@ -479,7 +491,7 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
                 std::string alias = tokens[i+1];
                 if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
                 if (!selectedCols.empty()) aliases[selectedCols.back()] = alias;
-                i++;
+                ++i;
             }
         } else {
             selectedCols.push_back(tokens[i]);
@@ -551,57 +563,70 @@ Result SQLParser::handleDelete(const std::vector<std::string>& tokens, Hierarchy
     }
 }
 
-Result SQLParser::handleUpdate(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    // Проверка синтаксиса: UPDATE [table] SET [col] = [val] <WHERE ...>
+Result SQLParser::handleUpdate(const std::vector<std::string>& tokens,
+                                HierarchyManager& hm, OutputCallback callback) {
     if (tokens.size() < 6 || toUpper(tokens[2]) != "SET") {
-        std::string err = "[Error] Syntax error. Expected: UPDATE [table] SET [col] = [val] <WHERE condition>;\n";
-        callback(err);
+        std::string err = "[Error] Expected: UPDATE [table] SET col=val,... <WHERE cond>;\n";
+        callback(err); 
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
     }
-
-    if (tokens[4] != "=") {
-        std::string err = "[Error] Syntax error. Expected '=' after column name in SET clause.\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
-    }
-
     try {
         auto res = hm.resolveTablePath(tokens[1]);
         res.throw_if_error();
 
+        std::vector<std::pair<std::string,std::string>> assignments;
+        size_t i = 3;
+        while (i < tokens.size() && toUpper(tokens[i]) != "WHERE") {
+            if (tokens[i] == ",") { 
+                ++i; 
+                continue; 
+            }
+            if (i + 2 < tokens.size() && tokens[i + 1] == "=") {
+                assignments.emplace_back(tokens[i], tokens[i + 2]);
+                i += 3;
+            } else {
+                ++i;
+            }
+        }
+
+        if (assignments.empty()) {
+            std::string err = "[Error] No assignments in SET clause.\n";
+            callback(err); 
+            return Result::Error(StatusCode::SYNTAX_ERROR, err);
+        }
+
         auto whereTokens = getWhereTokens(tokens);
         auto tree = buildExpressionTree(whereTokens);
 
-        Result upd_res = TableManager::executeUpdate(res.path, tree.get(), tokens[3], tokens[5]);
-        upd_res.throw_if_error();
-
-        callback("[Success] " + upd_res.details + "\n");
-        return upd_res;
-
+        Result upd = TableManager::executeUpdate(res.path, tree.get(), assignments);
+        upd.throw_if_error();
+        callback("[Success] " + upd.details + "\n");
+        return upd;
     } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
+        Result err = Result::Error(e.code(), e.what());
+        callback("[Error] " + ErrorUtils::formatMessage(err) + "\n");
+        return err;
     }
 }
 
-//  Поиск индекса, где начинаются сами значения (после слова VALUE)
 size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, std::vector<std::string>& outColNames) const {
-    size_t i = 3; // Начинаем после "INSERT INTO table_name"
+    size_t i = 3;
 
     if (i < tokens.size() && tokens[i] == "(") {
-        i++; // Пропускаем открывающую скобку
+        ++i;
         while (i < tokens.size() && tokens[i] != ")") {
             if (tokens[i] != ",") {
                 outColNames.push_back(tokens[i]);
             }
-            i++;
+            ++i;
         }
-        if (i < tokens.size()) i++; // Пропускаем закрывающую скобку
+        if (i < tokens.size()){ 
+            ++i;
+        }
     }
 
     while (i < tokens.size() && toUpper(tokens[i]) != "VALUE") {
-        i++;
+        ++i;
     }
     
     if (i + 1 < tokens.size() && tokens[i+1] == "(") {
@@ -611,7 +636,6 @@ size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, st
     return std::string::npos; 
 }
 
-// Сбор значений в массив строк
 std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<std::string>& tokens, size_t startIdx) const {
     std::vector<std::string> values;
     
@@ -627,7 +651,6 @@ std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<st
     return values;
 }
 
-// Помощник: ищет порядковый номер колонки по её имени
 int SQLParser::findColumnIndex(const TableHeader& header, const std::string& colName) const {
     for (uint32_t c = 0; c < header.column_count; ++c) {
         if (std::string(header.columns[c].name) == colName) return (int)c;
@@ -635,7 +658,6 @@ int SQLParser::findColumnIndex(const TableHeader& header, const std::string& col
     return -1;
 }
 
-// Помощник: проверяет NOT_NULL и подставляет DEFAULT (Задание №10)
 bool SQLParser::applyConstraints(Row& row, const TableHeader& header, OutputCallback callback) const {
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (row[i].is_null) {
@@ -651,7 +673,6 @@ bool SQLParser::applyConstraints(Row& row, const TableHeader& header, OutputCall
     return true;
 }
 
-// ОСНОВНОЙ МЕТОД
 bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header, 
                                      const std::vector<std::string>& targetCols, 
                                      const std::vector<std::string>& rawValues,
@@ -663,7 +684,6 @@ bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header,
     }
 
     if (!targetCols.empty()) {
-        // Случай: INSERT INTO (col1, col3) VALUE (val1, val3)
         for (size_t i = 0; i < targetCols.size() && i < rawValues.size(); ++i) {
             int cIdx = findColumnIndex(header, targetCols[i]);
             if (cIdx != -1) {
@@ -674,7 +694,6 @@ bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header,
             }
         }
     } else {
-        // Случай: INSERT INTO table VALUE (val1, val2, val3...)
         for (size_t i = 0; i < rawValues.size() && i < header.column_count; ++i) {
             outRow[i] = parseLiteral(rawValues[i]);
         }

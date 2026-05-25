@@ -33,19 +33,42 @@ bool TableManager::matches(const Row& row, const TableHeader& header,
 }
 
 bool TableManager::evaluateLeaf(const Row& row, const TableHeader& header,
-                                  const ExpressionNode* cond) {
+                                 const ExpressionNode* cond) {
     if (!cond) return false;
 
     int colIdx = -1;
     for (uint32_t i = 0; i < header.column_count; ++i) {
         if (std::string(header.columns[i].name) == cond->column) {
-            colIdx = static_cast<int>(i);
-            break;
+            colIdx = static_cast<int>(i); break;
         }
     }
-    if (colIdx == -1) return false;
+    if (colIdx == -1) {
+        return false;
+    }
+    const Value& cell = row[colIdx];
+    if (cell.is_null) {
+        return false;
+    }
 
-    return Value::compare(row[colIdx], cond->val1_parsed, cond->op);
+    if (cond->op == "BETWEEN") {
+        Value lo = cond->val1_parsed;
+        Value hi = cond->val2_parsed;
+        return Value::compare(cell, lo, ">=") && Value::compare(cell, hi, "<");
+    }
+
+    if (cond->op == "LIKE") {
+        if (cell.type != DataType::STR) {
+            return false;
+        }
+        try {
+            std::regex re(cond->val1_parsed.str_val);
+            return std::regex_search(cell.str_val, re);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    return Value::compare(cell, cond->val1_parsed, cond->op);
 }
 
 
