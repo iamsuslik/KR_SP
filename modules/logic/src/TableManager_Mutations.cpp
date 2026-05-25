@@ -348,10 +348,8 @@ static void relocate_record(Pager& pager, TableHeader& header,
 }
 
 
-Result TableManager::executeUpdate(const std::string& full_path,
-                                   const ExpressionNode* cond,
-                                   const std::string& targetCol,
-                                   const std::string& newVal) {
+Result TableManager::executeUpdate(const std::string& full_path, const ExpressionNode* cond,
+                                   const std::string& targetCol, const std::string& newVal) {
     try {
         std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
@@ -359,55 +357,49 @@ Result TableManager::executeUpdate(const std::string& full_path,
         pager.read_page(0, &header).throw_if_error();
 
         RecordID rid;
-        if (getRIDFromIndex(pager, header, cond, rid).isOk()) {
+        Result idx_res = getRIDFromIndex(pager, header, cond, rid);
+
+        if (idx_res.isOk()) {
             alignas(PAGE_SIZE) char buf[PAGE_SIZE];
             pager.read_page(rid.page_id, buf).throw_if_error();
 
             Slot* slots = get_slots(buf);
-            if (rid.slot_id < get_hdr(buf)->slot_count
-                && slots[rid.slot_id].length > 0) {
 
-                Row row = RecordManager::extractRowDynamic(
-                    buf + slots[rid.slot_id].offset, header);
-                bool h_changed = false;
+            Row row = RecordManager::extractRowDynamic(buf + slots[rid.slot_id].offset, header);
+            bool h_changed = false;
 
-                for (uint32_t c = 0; c < header.column_count; ++c) {
-                    if (targetCol == header.columns[c].name) {
-                        updateFieldAndIndex(row, c, newVal, header, pager,
-                                            rid, h_changed);
-                        break;
-                    }
+            for (uint32_t c = 0; c < header.column_count; ++c) {
+                if (targetCol == header.columns[c].name) {
+                    updateFieldAndIndex(row, c, newVal, header, pager, rid, h_changed);
+                    break;
                 }
-
-                std::vector<char> new_rec =
-                    RecordManager::serializeRowDynamic(row, header);
-                uint16_t new_size = static_cast<uint16_t>(new_rec.size());
-                uint16_t old_size = slots[rid.slot_id].length;
-
-                if (new_size <= old_size) {
-                    std::memcpy(buf + slots[rid.slot_id].offset,
-                                new_rec.data(), new_size);
-                    slots[rid.slot_id].length = new_size;
-                    pager.write_page(rid.page_id, buf).throw_if_error();
-                } else {
-                    pager.write_page(rid.page_id, buf).throw_if_error();
-                    relocate_record(pager, header, buf,
-                                    static_cast<uint16_t>(rid.slot_id),
-                                    new_rec, row);
-                    h_changed = true;
-                }
-
-                if (h_changed) pager.write_page(0, &header).throw_if_error();
             }
-            return Result::Success({0, 0}, "Updated 1 row (Point Update)");
+
+            std::vector<char> new_rec = RecordManager::serializeRowDynamic(row, header);
+            uint16_t new_size = static_cast<uint16_t>(new_rec.size());
+            uint16_t old_size = slots[rid.slot_id].length;
+
+            if (new_size <= old_size) {
+                std::memcpy(buf + slots[rid.slot_id].offset, new_rec.data(), new_size);
+                slots[rid.slot_id].length = new_size;
+                pager.write_page(rid.page_id, buf).throw_if_error();
+            } else {
+                pager.write_page(rid.page_id, buf).throw_if_error();
+                relocate_record(pager, header, buf, static_cast<uint16_t>(rid.slot_id), new_rec, row);
+                h_changed = true;
+            }
+
+            if (h_changed) pager.write_page(0, &header).throw_if_error();
+            return Result::Success({0, 0}, "Updated 1 row (Index)");
+        }
+
+        if (idx_res.code == StatusCode::NOT_FOUND) {
+            return Result::Success({0, 0}, "Updated 0 rows");
         }
 
         int count = fullScanUpdate(pager, header, cond, targetCol, newVal);
-        return Result::Success({0, 0},
-                               "Updated " + std::to_string(count) + " rows");
+        return Result::Success({0, 0}, "Updated " + std::to_string(count) + " rows (Full Scan)");
 
-    } catch (const DbException& e) {
-        return Result::Error(e.code(), e.what());
     } catch (const std::exception& e) {
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
     }
@@ -512,8 +504,7 @@ int TableManager::fullScanUpdate(Pager& pager, TableHeader& header,
 }
 
 
-Result TableManager::executeDelete(const std::string& full_path,
-                                   const ExpressionNode* cond) {
+Result TableManager::executeDelete(const std::string& full_path, const ExpressionNode* cond) {
     try {
         std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
@@ -521,32 +512,34 @@ Result TableManager::executeDelete(const std::string& full_path,
         pager.read_page(0, &header).throw_if_error();
 
         RecordID rid;
-        if (getRIDFromIndex(pager, header, cond, rid).isOk()) {
+        Result idx_res = getRIDFromIndex(pager, header, cond, rid);
+
+        if (idx_res.isOk()) {
             alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-            if (pager.read_page(rid.page_id, buf).isOk()) {
-                Slot* slots = get_slots(buf);
-                if (rid.slot_id < get_hdr(buf)->slot_count
-                    && slots[rid.slot_id].length > 0) {
+            pager.read_page(rid.page_id, buf).throw_if_error();
+            Slot* slots = get_slots(buf);
 
-                    Row row = RecordManager::extractRowDynamic(
-                        buf + slots[rid.slot_id].offset, header);
-                    clearIndicesForRow(pager, header, row);
+            Row row = RecordManager::extractRowDynamic(buf + slots[rid.slot_id].offset, header);
+            clearIndicesForRow(pager, header, row);
 
-                    slots[rid.slot_id].length = 0;
-                    slots[rid.slot_id].offset = 0;
-                    recalc_free_space(get_hdr(buf));
+            slots[rid.slot_id].length = 0;
+            slots[rid.slot_id].offset = 0;
+            recalc_free_space(get_hdr(buf));
 
-                    pager.write_page(rid.page_id, buf).throw_if_error();
-                    pager.write_page(0, &header).throw_if_error();
-                }
-            }
-            return {StatusCode::OK, "Deleted 1 row (Point Delete)"};
+            pager.write_page(rid.page_id, buf).throw_if_error();
+            pager.write_page(0, &header).throw_if_error();
+            
+            return Result::Success({0,0}, "Deleted 1 row (Optimized via Index)");
+        } 
+        
+        if (idx_res.code == StatusCode::NOT_FOUND) {
+            return Result::Success({0,0}, "Deleted 0 rows (Confirmed by Index)");
         }
 
         int count = fullScanDelete(pager, header, cond);
         pager.write_page(0, &header).throw_if_error();
-        return {StatusCode::OK,
-                "Deleted " + std::to_string(count) + " rows (Full Scan)"};
+        
+        return Result::Success({0,0}, "Deleted " + std::to_string(count) + " rows (Full Scan)");
 
     } catch (const std::exception& e) {
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
