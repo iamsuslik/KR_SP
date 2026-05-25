@@ -1,67 +1,139 @@
 #include "RecordManager.h"
-#include <iostream>
 #include <cstring>
-#include <regex>
+#include <vector>
 
+void RecordManager::initPage(char* page_buffer) {
+    std::memset(page_buffer, 0, PAGE_SIZE);
+    PageHeader* hdr = reinterpret_cast<PageHeader*>(page_buffer);
+    hdr->slot_count = 0;
+    hdr->free_ptr = PAGE_SIZE;
+    hdr->free_space = PAGE_SIZE - sizeof(PageHeader);
+}
 
-Result RecordManager::serializeRow(const Row& input_row, char* out_slot, const TableHeader& header) {
-    std::memset(out_slot, 0, header.row_size);
-    int offset = 0;
+uint16_t RecordManager::calculateSize(const Row& row, const TableHeader& header) {
+    uint16_t size = sizeof(uint16_t);
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        if (i >= row.size() || row[i].is_null) continue;
 
-    // Флаг занятости слота (occupied)
-    bool occupied = true;
-    std::memcpy(out_slot + offset, &occupied, sizeof(bool));
-    offset += sizeof(bool);
+        if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
+            size += sizeof(int);
+        } else {
+            size += sizeof(uint32_t);
+            size += static_cast<uint16_t>(row[i].str_val.size());
+        }
+    }
+    return size;
+}
 
-    // Подготовка null-битмапа
-    uint16_t null_bitmap = 0;
-    int bitmap_offset = offset;
+std::vector<char> RecordManager::serializeRowDynamic(const Row& row, const TableHeader& header) {
+    uint16_t total_size = calculateSize(row, header);
+    std::vector<char> buffer(total_size);
+    uint16_t offset = 0;
+
+    uint16_t bitmap = 0;
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        if (i < row.size() && !row[i].is_null) {
+            bitmap |= (1 << i);
+        }
+    }
+    std::memcpy(buffer.data() + offset, &bitmap, sizeof(uint16_t));
     offset += sizeof(uint16_t);
 
     for (uint32_t i = 0; i < header.column_count; ++i) {
-        const auto& col = header.columns[i];
-        const Value* val = (i < input_row.size()) ? &input_row[i] : nullptr;
+        if (!(bitmap & (1 << i))) continue;
 
-        // Если значение отсутствует или оно NULL
-        if (val == nullptr || val->is_null) {
-            if (col.has_default) {
-                size_t field_size = (col.type == static_cast<uint8_t>(DataType::INT)) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
-                std::memcpy(out_slot + offset, col.default_val, field_size);
-                null_bitmap |= (1 << i); // Помечаем, что значение теперь есть (дефолтное)
-            } else if (col.is_not_null) {
-                // Используем код ошибки NOT_NULL_VIOLATION 
-                return Result::Error(StatusCode::NOT_NULL_VIOLATION, "Column '" + std::string(col.name) + "'");
-            }
-            offset += (col.type == static_cast<uint8_t>(DataType::INT)) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
+        if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
+            std::memcpy(buffer.data() + offset, &row[i].int_val, sizeof(int));
+            offset += sizeof(int);
         } else {
-            null_bitmap |= (1 << i);
-            writeField(out_slot, offset, val, col);
+            uint32_t s_len = static_cast<uint32_t>(row[i].str_val.size());
+            std::memcpy(buffer.data() + offset, &s_len, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            std::memcpy(buffer.data() + offset, row[i].str_val.c_str(), s_len);
+            offset += s_len;
+        }
+    }
+    return buffer;
+}
+
+Row RecordManager::extractRowDynamic(const char* record_ptr, const TableHeader& header) {
+    Row row;
+    uint16_t offset = 0;
+
+    uint16_t bitmap;
+    std::memcpy(&bitmap, record_ptr + offset, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        if (!(bitmap & (1 << i))) {
+            row.push_back(Value());
+        } else {
+            if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
+                int val;
+                std::memcpy(&val, record_ptr + offset, sizeof(int));
+                row.push_back(Value(val));
+                offset += sizeof(int);
+            } else {
+                uint32_t str_len;
+                std::memcpy(&str_len, record_ptr + offset, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                std::string s(record_ptr + offset, str_len);
+                row.push_back(Value(s));
+                offset += str_len;
+            }
+        }
+    }
+    return row;
+}
+
+bool RecordManager::isPageEmpty(const char* page_buffer) {
+    const auto* hdr = reinterpret_cast<const PageHeader*>(page_buffer);
+    if (hdr->slot_count == 0) return true;
+
+    const auto* slots = reinterpret_cast<const Slot*>(page_buffer + sizeof(PageHeader));
+    for (uint16_t i = 0; i < hdr->slot_count; ++i) {
+        if (slots[i].length > 0) return false;
+    }
+    return true;
+}
+
+void RecordManager::compact_page(char* page_buffer) {
+    char temp[PAGE_SIZE];
+    std::memset(temp, 0, PAGE_SIZE);
+
+    auto* old_hdr = reinterpret_cast<PageHeader*>(page_buffer);
+    auto* new_hdr = reinterpret_cast<PageHeader*>(temp);
+    auto* old_slots = reinterpret_cast<Slot*>(page_buffer + sizeof(PageHeader));
+    auto* new_slots = reinterpret_cast<Slot*>(temp + sizeof(PageHeader));
+
+    *new_hdr = *old_hdr;
+    new_hdr->free_ptr = PAGE_SIZE; 
+
+    for (uint16_t i = 0; i < old_hdr->slot_count; ++i) {
+        if (old_slots[i].length > 0 && old_slots[i].offset > 0) {
+            new_hdr->free_ptr -= old_slots[i].length;
+            std::memcpy(temp + new_hdr->free_ptr, page_buffer + old_slots[i].offset, old_slots[i].length);
+            
+            new_slots[i].offset = new_hdr->free_ptr;
+            new_slots[i].length = old_slots[i].length;
+        } else {
+            new_slots[i].offset = 0;
+            new_slots[i].length = 0;
         }
     }
 
-    // Записываем финальный битмап в слот
-    std::memcpy(out_slot + bitmap_offset, &null_bitmap, sizeof(uint16_t));
-    return Result::Success();
-}
+    uint16_t slots_area_end = sizeof(PageHeader) + (new_hdr->slot_count * sizeof(Slot));
+    new_hdr->free_space = new_hdr->free_ptr - slots_area_end;
 
-void RecordManager::writeField(char* out_slot, int& offset, const Value* val, const ColumnSchema& col) {
-    if (col.type == static_cast<uint8_t>(DataType::INT)) {
-        int to_write = (val && !val->is_null) ? val->int_val : 0;
-        std::memcpy(out_slot + offset, &to_write, TYPE_INT_SIZE);
-        offset += TYPE_INT_SIZE;
-    } else {
-        const char* str_to_write = (val && !val->is_null) ? val->str_val.c_str() : "";
-        std::strncpy(out_slot + offset, str_to_write, TYPE_STR_SIZE - 1);
-        out_slot[offset + TYPE_STR_SIZE - 1] = '\0';
-        offset += TYPE_STR_SIZE;
-    }
+    std::memcpy(page_buffer, temp, PAGE_SIZE);
 }
 
 void RecordManager::initColumnSchema(ColumnSchema& dest, const ColumnDef& src) {
+    std::memset(&dest, 0, sizeof(ColumnSchema));
     std::strncpy(dest.name, src.name.c_str(), MAX_NAME_LEN - 1);
     dest.name[MAX_NAME_LEN - 1] = '\0';
 
-    dest.type = (src.type == DataType::INT) ? static_cast<uint8_t>(DataType::INT) : 1; 
+    dest.type = (src.type == DataType::INT) ? static_cast<uint8_t>(DataType::INT) : 1;
     dest.is_indexed = src.is_indexed;
     dest.is_not_null = src.is_not_null;
     dest.has_default = src.has_default;
@@ -78,49 +150,7 @@ void RecordManager::initColumnSchema(ColumnSchema& dest, const ColumnDef& src) {
         } else {
             std::string d_val = src.default_value;
             if (!d_val.empty() && d_val.front() == '"') d_val = d_val.substr(1, d_val.size() - 2);
-            
             std::strncpy(dest.default_val, d_val.c_str(), TYPE_STR_SIZE - 1);
-            dest.default_val[TYPE_STR_SIZE - 1] = '\0';
         }
     }
-}
-
-Row RecordManager::extractRow(const char* slot_ptr, const TableHeader& header) {
-    Row row;
-    uint16_t null_bitmap;
-    std::memcpy(&null_bitmap, slot_ptr + sizeof(bool), sizeof(uint16_t));
-    
-    int off = ROW_METADATA_SIZE; 
-    for (uint32_t c = 0; c < header.column_count; ++c) {
-        bool is_null = !(null_bitmap & (1 << c));
-        
-        if (is_null) {
-            row.push_back(Value());
-            off += (header.columns[c].type == static_cast<uint8_t>(DataType::INT)) ? TYPE_INT_SIZE : TYPE_STR_SIZE;
-        } else {
-            if (header.columns[c].type == static_cast<uint8_t>(DataType::INT)) {
-                int v; std::memcpy(&v, slot_ptr + off, TYPE_INT_SIZE);
-                row.push_back(Value(v)); 
-                off += TYPE_INT_SIZE;
-            } else {
-                char s[TYPE_STR_SIZE];
-                std::memcpy(s, slot_ptr + off, TYPE_STR_SIZE);
-                s[TYPE_STR_SIZE - 1] = '\0';
-                row.push_back(Value(std::string(s))); 
-                off += TYPE_STR_SIZE;
-            }
-        }
-    }
-    return row;
-}
-
-
-bool RecordManager::isPageEmpty(const char* page_buffer, uint32_t row_size) {
-    int slots = PAGE_SIZE / row_size;
-    for (int i = 0; i < slots; ++i) {
-        bool occupied;
-        std::memcpy(&occupied, page_buffer + (i * row_size), sizeof(bool));
-        if (occupied) return false;
-    }
-    return true;
 }
