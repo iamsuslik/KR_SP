@@ -53,7 +53,6 @@ int SQLParser::getPrecedence(const std::string& op) {
     return 0;
 }
 
-// Создание листа дерева (операнда)
 std::shared_ptr<ExpressionNode> SQLParser::createLeaf(const std::string& token) {
     auto leaf = std::make_shared<ExpressionNode>();
     leaf->is_op = false;
@@ -94,117 +93,154 @@ void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& value
     values.push(node);
 }
 
-std::shared_ptr<ExpressionNode> SQLParser::buildExpressionTree(
-        const std::vector<std::string>& tokens) {
-    if (tokens.empty()) return nullptr;
-
-    std::stack<std::shared_ptr<ExpressionNode>> values;
-    std::stack<std::string> ops;
-
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (tokens[i].empty()) continue;
-        std::string upToken = toUpper(tokens[i]);
-
-        if (upToken == "BETWEEN") {
-            if (i + 3 < tokens.size() && toUpper(tokens[i + 2]) == "AND") {
-                Value lo = parseLiteral(tokens[i + 1]);
-                Value hi = parseLiteral(tokens[i + 3]);
-                i += 3;
-
-                if (values.empty()) continue;
-                auto col_leaf = values.top(); values.pop();
-
-                auto node = std::make_shared<ExpressionNode>();
-                node->is_op = false;
-                node->op = "BETWEEN";
-                node->column = col_leaf->column;
-                node->val1_parsed = lo;
-                node->val2_parsed = hi;
-                values.push(node);
-            }
-            continue;
-        }
-
-        if (upToken == "(") {
-            ops.push(upToken);
-        } else if (upToken == ")") {
-            while (!ops.empty() && ops.top() != "(")
-                applyOperator(values, ops);
-            if (!ops.empty()) ops.pop();
-        } else if (getPrecedence(upToken) > 0) {
-            while (!ops.empty() && ops.top() != "(" &&
-                   getPrecedence(ops.top()) >= getPrecedence(upToken))
-                applyOperator(values, ops);
-            ops.push(upToken);
-        } else {
-            values.push(createLeaf(tokens[i]));
-        }
-    }
-
-    while (!ops.empty()) {
-        if (ops.top() == "(") { ops.pop(); continue; }
-        applyOperator(values, ops);
-    }
-
-    return values.empty() ? nullptr : values.top();
+Token SQLParser::peek() const {
+    return token_stream[pos];
 }
 
-std::vector<std::string> SQLParser::tokenize(const std::string& query) const { 
-    std::vector<std::string> tokens;
+Token SQLParser::consume() {
+    return token_stream[pos++];
+}
+
+bool SQLParser::match(TokenType type, const std::string& val) {
+    if (pos >= token_stream.size()) return false;
+    if (token_stream[pos].type == type) {
+        if (val.empty() || toUpper(token_stream[pos].value) == toUpper(val)) {
+            pos++;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parseExpression() {
+    auto node = parseAnd();
+    while (match(TokenType::KEYWORD, "OR")) {
+        auto right = parseAnd();
+        node = std::make_unique<LogicalNode>("OR", std::move(node), std::move(right));
+    }
+    return node;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parseAnd() {
+    auto node = parsePrimary();
+    while (match(TokenType::KEYWORD, "AND")) {
+        auto right = parsePrimary();
+        node = std::make_unique<LogicalNode>("AND", std::move(node), std::move(right));
+    }
+    return node;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parsePrimary() {
+    if (match(TokenType::LPAREN)) {
+        auto node = parseExpression();
+        match(TokenType::RPAREN);
+        return node;
+    }
+
+    Token col = consume(); 
+
+    if (match(TokenType::KEYWORD, "BETWEEN")) {
+        Value low = parseLiteral(consume().value);
+        match(TokenType::KEYWORD, "AND");
+        Value high = parseLiteral(consume().value);
+        return std::make_unique<BetweenNode>(col.value, low, high);
+    }
+
+    Token op = consume();
+    Value val = parseLiteral(consume().value);
+    return std::make_unique<ComparisonNode>(col.value, op.value, val);
+}
+
+std::vector<std::string> SQLParser::getLegacyTokens(const std::vector<Token>& tokens) {
+    std::vector<std::string> legacy;
+    for (const auto& t : tokens) {
+        if (t.type != TokenType::END_OF_FILE) {
+            legacy.push_back(t.value);
+        }
+    }
+    return legacy;
+}
+
+TokenType SQLParser::getTokenType(const std::string& value) const {
+    std::string up = toUpper(value);
+    static const std::unordered_set<std::string> keywords = {
+        "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUE", "VALUES",
+        "CREATE", "TABLE", "DATABASE", "DROP", "USE", "UPDATE", "SET", 
+        "DELETE", "AND", "OR", "BETWEEN", "LIKE", "INT", "STR", 
+        "NOT_NULL", "INDEXED", "AS", "SUM", "COUNT", "AVG", "DEFAULT"
+    };
+
+    if (keywords.count(up)) return TokenType::KEYWORD;
+    if (value.front() == '"') return TokenType::LITERAL;
+    if (std::isdigit(static_cast<unsigned char>(value[0]))) return TokenType::LITERAL;
+    
+    return TokenType::IDENTIFIER;
+}
+
+std::vector<Token> SQLParser::lex(const std::string& query) {
+    std::vector<Token> result;
     std::string current;
     bool inQuotes = false;
 
     auto pushCurrent = [&]() {
-        if (!current.empty()) {
-            tokens.push_back(current);
-            current.clear();
-        }
+        if (current.empty()) return;
+        result.push_back({getTokenType(current), current});
+        current.clear();
     };
 
     for (size_t i = 0; i < query.length(); ++i) {
         char c = query[i];
-        
-        if (c == '"') {
-            inQuotes = !inQuotes;
-            current += c;
-            if (!inQuotes) pushCurrent(); 
-            continue;
-        }
 
-        if (inQuotes) {
-            current += c;
+        if (c == '"') {
+            if (inQuotes) {
+                current += c;
+                pushCurrent();
+                inQuotes = false;
+            } else {
+                pushCurrent();
+                inQuotes = true;
+                current += c;
+            }
             continue;
         }
+        if (inQuotes) { current += c; continue; }
 
         if (std::isspace(static_cast<unsigned char>(c))) {
             pushCurrent();
-        } 
-        else if (c == ',' || c == '(' || c == ')' || c == ';') {
+            continue;
+        }
+
+        if (c == ',' || c == '(' || c == ')' || c == ';' || c == '*') {
             pushCurrent();
-            if (c != ';') {
-                tokens.push_back(std::string(1, c));
-            }
-        } 
-        else if (c == '=' || c == '<' || c == '>' || c == '!') {
+            TokenType type;
+            if (c == ',') type = TokenType::COMMA;
+            else if (c == '(') type = TokenType::LPAREN;
+            else if (c == ')') type = TokenType::RPAREN;
+            else if (c == ';') type = TokenType::SEMICOLON;
+            else type = TokenType::STAR;
+            result.push_back({type, std::string(1, c)});
+            continue;
+        }
+
+        if (c == '=' || c == '<' || c == '>' || c == '!') {
             pushCurrent();
             std::string op(1, c);
-            
-            if (i + 1 < query.length() && query[i + 1] == '=') { 
-                op += "="; 
-                i++; 
+            if (i + 1 < query.length() && query[i + 1] == '=') {
+                op += "=";
+                i++;
             }
-            tokens.push_back(op);
-        } 
-        else {
-            current += c;
+            result.push_back({TokenType::OPERATOR, op});
+            continue;
         }
+
+        current += c;
     }
-    
-    pushCurrent(); 
-    return tokens;
+
+    pushCurrent();
+    result.push_back({TokenType::END_OF_FILE, ""});
+    return result;
 }
 
-// для проверки регистра 
 Result SQLParser::validateTokenCase(const std::vector<std::string>& tokens, OutputCallback callback) {
     for (const auto& t : tokens) {
         if (t.empty() || t.front() == '"') continue;
@@ -225,7 +261,6 @@ Result SQLParser::validateTokenCase(const std::vector<std::string>& tokens, Outp
     return Result::Success();
 }
 
-// логика DROP
 Result SQLParser::handleDrop(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
     if (tokens.size() < 3) {
         return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete DROP command");
@@ -263,34 +298,43 @@ Result SQLParser::handleDrop(const std::vector<std::string>& tokens, HierarchyMa
 
 Result SQLParser::process(const std::string& query, HierarchyManager& hm, OutputCallback callback) {
     try {
-        auto tokens = tokenize(query);
-        if (tokens.empty()) return Result::Success();
-        if (tokens[0].front() == '[') return Result::Success(); 
+        this->pos = 0;
+        this->token_stream = lex(query);
 
-        validateTokenCase(tokens, callback).throw_if_error();
+        if (token_stream.empty() || token_stream[0].type == TokenType::END_OF_FILE) {
+            return Result::Success();
+        }
 
-        std::string cmd = toUpper(tokens[0]);
+        std::vector<std::string> legacy_tokens = getLegacyTokens(token_stream);
+
+        if (legacy_tokens.empty() || legacy_tokens[0].front() == '[') return Result::Success(); 
+
+        validateTokenCase(legacy_tokens, callback).throw_if_error();
+
+        std::string cmd = toUpper(legacy_tokens[0]);
 
         if (cmd == "CREATE") {
-            if (tokens.size() < 2) return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete CREATE");
-            std::string sub = toUpper(tokens[1]);
-            if (sub == "DATABASE") return handleCreateDatabase(tokens, hm, callback);
-            if (sub == "TABLE")    return handleCreateTable(tokens, hm, callback);
+            if (legacy_tokens.size() < 2) return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete CREATE");
+            std::string sub = toUpper(legacy_tokens[1]);
+            if (sub == "DATABASE") return handleCreateDatabase(legacy_tokens, hm, callback);
+            if (sub == "TABLE")    return handleCreateTable(legacy_tokens, hm, callback);
         }
         
-        if (cmd == "USE")    return handleUse(tokens, hm, callback);
-        if (cmd == "INSERT") return handleInsert(tokens, hm, callback);
-        if (cmd == "SELECT") return handleSelect(tokens, hm, callback);
-        if (cmd == "DELETE") return handleDelete(tokens, hm, callback);
-        if (cmd == "UPDATE") return handleUpdate(tokens, hm, callback);
-        if (cmd == "DROP")   return handleDrop(tokens, hm, callback);
+        if (cmd == "USE")    return handleUse(legacy_tokens, hm, callback);
+        if (cmd == "INSERT") return handleInsert(legacy_tokens, hm, callback);
+        if (cmd == "SELECT") return handleSelect(legacy_tokens, hm, callback);
+        if (cmd == "DELETE") return handleDelete(legacy_tokens, hm, callback);
+        if (cmd == "UPDATE") return handleUpdate(legacy_tokens, hm, callback);
+        if (cmd == "DROP")   return handleDrop(legacy_tokens, hm, callback);
 
-        std::string err = "[Error] Unknown command: " + tokens[0] + "\n";
+        std::string err = "[Error] Unknown command: " + legacy_tokens[0] + "\n";
         callback(err);
         return Result::Error(StatusCode::SYNTAX_ERROR, err);
 
     } catch (const DbException& e) {
         return Result::Error(e.code(), e.what());
+    } catch (const std::exception& e) {
+        return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
     }
 }
 
@@ -399,7 +443,7 @@ Result SQLParser::handleCreateTable(const std::vector<std::string>& tokens, Hier
         }
 
         std::vector<ColumnDef> cols;
-        size_t index = 4; // Сразу после '('
+        size_t index = 4;
         parseColumnDefinitions(tokens, index, cols).throw_if_error();
 
         Result create_res = TableManager::createTable(res.path, TableSchema(tableName, cols));
@@ -463,7 +507,6 @@ size_t SQLParser::findKeyword(const std::vector<std::string>& tokens, const std:
     return std::string::npos;
 }
 
-// логика парсинга колонок, агрегатов и алиасов
 Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t fromIdx, 
                                  std::vector<std::string>& selectedCols, 
                                  std::vector<AggregateRequest>& aggs, 
@@ -474,7 +517,6 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
         std::string token = toUpper(tokens[i]);
         if (token == ",") continue;
 
-        // Логика агрегатов (SUM, COUNT, AVG)
         if (token == "SUM" || token == "COUNT" || token == "AVG") {
             if (i + 3 < fromIdx && tokens[i+1] == "(" && tokens[i+3] == ")") {
                 AggregateType type = (token == "SUM") ? AggregateType::SUM : 
@@ -485,7 +527,6 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
             }
         }
 
-        // Логика алиасов (AS)
         if (toUpper(tokens[i]) == "AS") {
             if (i + 1 < fromIdx) {
                 std::string alias = tokens[i+1];
@@ -500,112 +541,110 @@ Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t
     return Result::Success();
 }
 
-Result SQLParser::handleSelect(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-
-    size_t fromIdx = findKeyword(tokens, "FROM");
-    if (fromIdx == std::string::npos || fromIdx + 1 >= tokens.size()) {
-        std::string err = "[Error] Syntax error. Expected FROM [table_name]\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+Result SQLParser::handleSelect(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
+    size_t fromIdx = findKeyword(legacy_tokens, "FROM");
+    if (fromIdx == std::string::npos || fromIdx + 1 >= legacy_tokens.size()) {
+        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: SELECT ... FROM [table_name]");
     }
 
-    std::string tableName = tokens[fromIdx + 1];
+    std::string tableName = legacy_tokens[fromIdx + 1];
     std::vector<std::string> selectedCols;
     std::vector<AggregateRequest> aggs;
     std::map<std::string, std::string> aliases;
 
     try {
-        parseProjection(tokens, fromIdx, selectedCols, aggs, aliases).throw_if_error();
+        parseProjection(legacy_tokens, fromIdx, selectedCols, aggs, aliases).throw_if_error();
 
         auto res = hm.resolveTablePath(tableName);
         res.throw_if_error();
 
-        auto whereTokens = getWhereTokens(tokens);
-        auto tree = buildExpressionTree(whereTokens);
-    
-        Result select_res = TableManager::executeSelect(res.path, tree.get(), selectedCols, aliases, aggs, callback);
-        select_res.throw_if_error();
-        
-        return select_res;
+        std::unique_ptr<ASTNode> root_node = nullptr;
+        for (size_t i = 0; i < token_stream.size(); ++i) {
+            if (token_stream[i].type == TokenType::KEYWORD && toUpper(token_stream[i].value) == "WHERE") {
+                this->pos = i + 1;
+                root_node = parseExpression();
+                break;
+            }
+        }
+
+        return TableManager::executeSelect(res.path, root_node.get(), selectedCols, aliases, aggs, callback);
 
     } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
+        return Result::Error(e.code(), e.what());
     }
 }
 
-Result SQLParser::handleDelete(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-
-    if (tokens.size() < 3 || toUpper(tokens[1]) != "FROM") {
-        std::string err = "[Error] Syntax error. Expected: DELETE FROM [table_name] <WHERE condition>;\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+Result SQLParser::handleDelete(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
+    if (legacy_tokens.size() < 3 || toUpper(legacy_tokens[1]) != "FROM") {
+        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: DELETE FROM [table_name] <WHERE...>");
     }
 
     try {
-        auto res = hm.resolveTablePath(tokens[2]);
+        auto res = hm.resolveTablePath(legacy_tokens[2]);
         res.throw_if_error();
 
-        auto whereTokens = getWhereTokens(tokens);
-        auto tree = buildExpressionTree(whereTokens);
+        std::unique_ptr<ASTNode> root_node = nullptr;
+        for (size_t i = 0; i < token_stream.size(); ++i) {
+            if (token_stream[i].type == TokenType::KEYWORD && toUpper(token_stream[i].value) == "WHERE") {
+                this->pos = i + 1;
+                root_node = parseExpression();
+                break;
+            }
+        }
 
-        Result del_res = TableManager::executeDelete(res.path, tree.get());
+        Result del_res = TableManager::executeDelete(res.path, root_node.get());
         del_res.throw_if_error();
 
         callback("[Success] " + del_res.details + "\n");
         return del_res;
 
     } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
+        return Result::Error(e.code(), e.what());
     }
 }
 
-Result SQLParser::handleUpdate(const std::vector<std::string>& tokens,
-                                HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 6 || toUpper(tokens[2]) != "SET") {
-        std::string err = "[Error] Expected: UPDATE [table] SET col=val,... <WHERE cond>;\n";
-        callback(err); 
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+Result SQLParser::handleUpdate(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
+    if (legacy_tokens.size() < 6 || toUpper(legacy_tokens[2]) != "SET") {
+        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: UPDATE [table] SET col=val <WHERE...>");
     }
+
     try {
-        auto res = hm.resolveTablePath(tokens[1]);
+        auto res = hm.resolveTablePath(legacy_tokens[1]);
         res.throw_if_error();
 
-        std::vector<std::pair<std::string,std::string>> assignments;
-        size_t i = 3;
-        while (i < tokens.size() && toUpper(tokens[i]) != "WHERE") {
-            if (tokens[i] == ",") { 
-                ++i; 
-                continue; 
-            }
-            if (i + 2 < tokens.size() && tokens[i + 1] == "=") {
-                assignments.emplace_back(tokens[i], tokens[i + 2]);
+        std::vector<std::pair<std::string, Value>> assignments;
+        size_t i = 3; 
+        
+        while (i < legacy_tokens.size() && toUpper(legacy_tokens[i]) != "WHERE") {
+            if (legacy_tokens[i] == ",") { i++; continue; }
+            
+            if (i + 2 < legacy_tokens.size() && legacy_tokens[i+1] == "=") {
+                assignments.emplace_back(legacy_tokens[i], parseLiteral(legacy_tokens[i+2]));
                 i += 3;
             } else {
-                ++i;
+                break; 
             }
         }
 
-        if (assignments.empty()) {
-            std::string err = "[Error] No assignments in SET clause.\n";
-            callback(err); 
-            return Result::Error(StatusCode::SYNTAX_ERROR, err);
+        if (assignments.empty()) return Result::Error(StatusCode::SYNTAX_ERROR, "No assignments found");
+
+        std::unique_ptr<ASTNode> root_node = nullptr;
+        for (size_t k = 0; k < token_stream.size(); ++k) {
+            if (token_stream[k].type == TokenType::KEYWORD && toUpper(token_stream[k].value) == "WHERE") {
+                this->pos = k + 1;
+                root_node = parseExpression();
+                break;
+            }
         }
 
-        auto whereTokens = getWhereTokens(tokens);
-        auto tree = buildExpressionTree(whereTokens);
+        Result upd_res = TableManager::executeUpdate(res.path, root_node.get(), assignments);
+        upd_res.throw_if_error();
 
-        Result upd = TableManager::executeUpdate(res.path, tree.get(), assignments);
-        upd.throw_if_error();
-        callback("[Success] " + upd.details + "\n");
-        return upd;
+        callback("[Success] " + upd_res.details + "\n");
+        return upd_res;
+
     } catch (const DbException& e) {
-        Result err = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err) + "\n");
-        return err;
+        return Result::Error(e.code(), e.what());
     }
 }
 

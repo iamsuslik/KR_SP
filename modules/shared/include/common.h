@@ -17,6 +17,16 @@ constexpr const int TYPE_STR_SIZE = 256;
 constexpr const int TYPE_INT_SIZE = 4;
 constexpr const size_t PAGE_INTERNAL_RESERVE = 64;
 
+enum class TokenType {
+    IDENTIFIER, KEYWORD, LITERAL, OPERATOR, 
+    LPAREN, RPAREN, COMMA, SEMICOLON, STAR, END_OF_FILE
+};
+
+struct Token {
+    TokenType type;
+    std::string value;
+};
+
 struct RecordID {
     uint32_t page_id;
     uint32_t slot_id;
@@ -176,17 +186,6 @@ static_assert(sizeof(TableHeader) == 4096, "TableHeader size must be exactly 409
 #pragma pack(pop)
 
 using Row = std::vector<Value>;
-
-struct ExpressionNode {
-    bool is_op = false;
-    std::string op;
-    std::string column;
-    std::string val1;
-    Value val1_parsed; 
-    Value val2_parsed;
-    std::shared_ptr<ExpressionNode> left;
-    std::shared_ptr<ExpressionNode> right;
-};
 
 enum class AggregateType { NONE, COUNT, SUM, AVG };
 struct AggregateRequest {

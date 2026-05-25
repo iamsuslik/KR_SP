@@ -5,6 +5,7 @@
 #include "Pager.h"
 #include "RecordManager.h"
 #include "TablePageManager.h"
+#include "ASTNode.h"
 #include <vector>
 #include <string>
 #include <map>
@@ -16,14 +17,14 @@ public:
     using OutputCallback = std::function<void(const std::string&)>;
 
     static Result executeSelect(const std::string& full_path,
-                               const ExpressionNode* cond,
+                               const ASTNode* cond,
                                const std::vector<std::string>& selectedCols,
                                const std::map<std::string, std::string>& aliases,
                                const std::vector<AggregateRequest>& aggs,
                                OutputCallback callback);
 
     static bool executePointQuery(Pager& pager, TableHeader& header,
-                                  const ExpressionNode* cond,
+                                  const ASTNode* cond,
                                   const std::vector<uint32_t>& colsToPrint,
                                   const std::map<std::string, std::string>& aliases,
                                   const std::vector<AggregateRequest>& aggs,
@@ -34,20 +35,36 @@ public:
 
     static Result insertRow(const std::string& full_path, const Row& row);
 
-    static Result executeUpdate(const std::string& full_path, const ExpressionNode* cond,
-        const std::vector<std::pair<std::string,std::string>>& assignments);
+    static Result executeUpdate(const std::string& full_path, const ASTNode* cond,
+        const std::vector<std::pair<std::string, Value>>& assignments);
 
-    static Result executeDelete(const std::string& full_path, const ExpressionNode* cond);
+    static Result executeDelete(const std::string& full_path, const ASTNode* cond);
 
     static Result dropTable(const std::string& full_path);
 
     static bool matches(const Row& row, const TableHeader& header,
-                        const ExpressionNode* node);
+                        const ASTNode* node);
 
     static bool evaluateLeaf(const Row& row, const TableHeader& header,
-                              const ExpressionNode* cond);
+                              const ASTNode* cond);
 
 private:
+
+    static inline PageHeader* get_hdr(char* buf) { return reinterpret_cast<PageHeader*>(buf); }
+    static inline const PageHeader* get_hdr(const char* buf) { return reinterpret_cast<const PageHeader*>(buf); }
+    static inline Slot* get_slots(char* buf) { return reinterpret_cast<Slot*>(buf + sizeof(PageHeader)); }
+    static inline const Slot* get_slots(const char* buf) { return reinterpret_cast<const Slot*>(buf + sizeof(PageHeader)); }
+
+    static bool isIndexPage(const TableHeader& header, uint32_t page_id);
+    static Row getRowFromSlot(const char* page_buffer, uint16_t slot_id, const TableHeader& header);
+
+    static void recalc_free_space(PageHeader* hdr);
+    static bool page_has_space(const char* buf, uint16_t rec_size);
+    static uint16_t write_record_to_page(char* page_buffer, const std::vector<char>& rec);
+    
+    static void relocate_record(Pager& pager, TableHeader& header, char* cur_page, uint16_t slot_idx, 
+                               const std::vector<char>& new_rec, const Row& new_row, const Row& old_row);
+    
     static void printRowAsJson(const Row& row, const TableHeader& header,
                                const std::vector<uint32_t>& colsToPrint,
                                const std::map<std::string, std::string>& aliases,
@@ -61,7 +78,7 @@ private:
                                                const std::vector<std::string>& selectedCols);
 
     static void processRow(const Row& row, const TableHeader& header,
-                           const ExpressionNode* cond,
+                           const ASTNode* cond,
                            const std::vector<AggregateRequest>& aggs,
                            const std::vector<uint32_t>& colsToPrint,
                            const std::map<std::string, std::string>& aliases,
@@ -79,15 +96,15 @@ private:
                               const Row& row, const RecordID& rid);
     
     static void applyAssignments(Row& row,
-                             const std::vector<std::pair<std::string,std::string>>& assignments,
+                             const std::vector<std::pair<std::string, Value>>& assignments,
                              TableHeader& header, Pager& pager,
                              RecordID rid, bool& header_changed);
                              
     static Result getRIDFromIndex(Pager& pager, TableHeader& header,
-                                  const ExpressionNode* cond, RecordID& out_rid);
+                                  const ASTNode* cond, RecordID& out_rid);
 
     static void executeTreeScan(Pager& pager, TableHeader& header,
-                                const ExpressionNode* cond,
+                                const ASTNode* cond,
                                 const std::vector<uint32_t>& colsToPrint,
                                 const std::map<std::string, std::string>& aliases,
                                 const std::vector<AggregateRequest>& aggs,
@@ -95,11 +112,11 @@ private:
                                 bool isAgg, OutputCallback callback);
 
     static int fullScanDelete(Pager& pager, TableHeader& header,
-                              const ExpressionNode* cond);
+                              const ASTNode* cond);
 
     static int fullScanUpdate(Pager& pager, TableHeader& header,
-        const ExpressionNode* cond,
-        const std::vector<std::pair<std::string,std::string>>& assignments);
+        const ASTNode* cond,
+        const std::vector<std::pair<std::string, Value>>& assignments);
 
     static void clearIndicesForRow(Pager& pager, TableHeader& header, const Row& row);
 
@@ -110,7 +127,7 @@ private:
                                RecordID& out_rid);
 
     static void fullScanSelect(Pager& pager, TableHeader& header,
-                               const ExpressionNode* cond,
+                               const ASTNode* cond,
                                const std::vector<AggregateRequest>& aggs,
                                const std::vector<uint32_t>& colsToPrint,
                                const std::map<std::string, std::string>& aliases,
@@ -119,6 +136,10 @@ private:
 
     static Result checkUniqueConstraints(Pager& pager, TableHeader& header,
                                          const Row& row, TablePageManager& pm);
+
+    static void handleRecordUpdate(Pager& pager, TableHeader& header, char* page_buffer, 
+                               uint32_t p_id, uint16_t slot_id, 
+                               const Row& new_row, const Row& old_row);
 };
 
 #endif // TABLE_MANAGER_H
