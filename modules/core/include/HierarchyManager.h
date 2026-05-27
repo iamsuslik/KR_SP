@@ -2,14 +2,12 @@
 #define HIERARCHY_MANAGER_H
 
 #include <string>
-#include <shared_mutex>
 #include "common.h"
 
 class HierarchyManager {
 private:
     const std::string ROOT_DIR = "data";
     std::string current_db;
-    mutable std::shared_mutex db_mtx;
 
 public:
     HierarchyManager();
