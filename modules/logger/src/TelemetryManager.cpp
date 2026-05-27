@@ -118,16 +118,32 @@ double TelemetryManager::getAvgDuration(int seconds) const {
 }
 
 void TelemetryManager::printMetrics() const {
-    // Чтение всех параметров под одним Read Lock для консистентности отчета
     std::shared_lock lock(mtx);
     
-    std::cout << "\n" << std::string(40, '=') << "\n"
+    std::cout << "\n" << std::string(REPORT_WIDTH, '=') << "\n"
               << "   DBMS REAL-TIME PERFORMANCE REPORT\n"
-              << std::string(40, '-') << "\n"
-              << std::left << std::setw(25) << "Current RPS (1s):" << getCurrentRPS() << "\n"
-              << std::left << std::setw(25) << "Average RPS (10m):" << std::fixed << std::setprecision(2) << getAvgRPS(10) << "\n"
-              << std::left << std::setw(25) << "Peak RPS (10m):" << getMaxRPS(10) << "\n"
-              << std::left << std::setw(25) << "Avg Latency (10s):" << getAvgDuration(10) << " ms\n"
-              << std::left << std::setw(25) << "Error Rate (1m):" << std::fixed << std::setprecision(1) << getErrorRate(1) << "%\n"
-              << std::string(40, '=') << std::endl;
+              << std::string(REPORT_WIDTH, '-') << "\n"
+              
+              << std::left << std::setw(LABEL_COLUMN_WIDTH) 
+              << "Current RPS (1s):" << getCurrentRPS() << "\n"
+              
+              << std::left << std::setw(LABEL_COLUMN_WIDTH) 
+              << "Average RPS (" << METRIC_RPS_WINDOW_MIN << "m):" 
+              << std::fixed << std::setprecision(FLOAT_PRECISION_RPS) 
+              << getAvgRPS(METRIC_RPS_WINDOW_MIN) << "\n"
+              
+              << std::left << std::setw(LABEL_COLUMN_WIDTH) 
+              << "Peak RPS (" << METRIC_RPS_WINDOW_MIN << "m):" 
+              << getMaxRPS(METRIC_RPS_WINDOW_MIN) << "\n"
+              
+              << std::left << std::setw(LABEL_COLUMN_WIDTH) 
+              << "Avg Latency (" << METRIC_LATENCY_WINDOW_SEC << "s):" 
+              << getAvgDuration(METRIC_LATENCY_WINDOW_SEC) << " ms\n"
+              
+              << std::left << std::setw(LABEL_COLUMN_WIDTH) 
+              << "Error Rate (" << METRIC_ERROR_WINDOW_MIN << "m):" 
+              << std::fixed << std::setprecision(FLOAT_PRECISION_ERROR) 
+              << getErrorRate(METRIC_ERROR_WINDOW_MIN) << "%\n"
+              
+              << std::string(REPORT_WIDTH, '=') << std::endl;
 }

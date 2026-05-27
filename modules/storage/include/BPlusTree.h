@@ -233,7 +233,7 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
     }
 
     uint32_t curr_id = _root_id;
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
 
     while (true) {
         _pager.read_page(curr_id, buffer).throw_if_error();
@@ -357,7 +357,7 @@ Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid
     }
 
     uint32_t curr_id = _root_id;
-    alignas(4096) char buffer[PAGE_SIZE];
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
     while (true) {
         _pager.read_page(curr_id, buffer).throw_if_error();
         auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
