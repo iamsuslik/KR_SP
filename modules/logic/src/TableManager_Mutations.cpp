@@ -9,6 +9,8 @@
 
 namespace fs = std::filesystem;
 
+int g_current_node_id = -1;
+
 Result TableManager::createTable(const std::string& full_path,
                                   const TableSchema& schema) {
     try {
@@ -129,7 +131,7 @@ Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header,
     }
 
     auto comp_node = dynamic_cast<const ComparisonNode*>(cond);
-    
+
     if (!comp_node) {
         return Result::Error(StatusCode::NOT_FOUND, "Condition is not a simple comparison");
     }
@@ -159,11 +161,9 @@ Result TableManager::getRIDFromIndex(Pager& pager, TableHeader& header,
             std::strncpy(key.data, comp_node->literal_value.str_val.c_str(), TYPE_STR_SIZE - 1);
             return index.find(key, out_rid);
         }
-    } 
-    catch (const DbException& e) {
+    } catch (const DbException& e) {
         return Result::Error(e.code(), std::string("Index internal error: ") + e.what());
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception& e) {
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
     }
 }
@@ -182,7 +182,7 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
         if (!pager.read_page(p, page_buffer).isOk()) continue;
 
         if (page_has_space(page_buffer, rec_size)) {
-            return {p, 0}; 
+            return {p, 0};
         }
 
         RecordManager::compact_page(page_buffer);
@@ -205,13 +205,13 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
 
 
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
-    int fd_to_unlock = -1; 
+    int fd_to_unlock = -1;
 
     try {
         Pager pager(full_path);
         fd_to_unlock = pager.get_fd();
 
-        TableLockManager::lock_table(fd_to_unlock, true);
+        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
 
         TableHeader header;
         pager.read_page(0, &header).throw_if_error();
@@ -240,19 +240,18 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
                 }
             }
         }
+
         updateIndices(pager, header, row, rid);
 
         TableLockManager::unlock_table(fd_to_unlock);
-
         return Result::Success(rid, "1 row inserted.");
-    } 
-    catch (const DbException& e) { 
+
+    } catch (const DbException& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
-        return Result::Error(e.code(), e.what()); 
-    }
-    catch (const std::exception& e) { 
+        return Result::Error(e.code(), e.what());
+    } catch (const std::exception& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
-        return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); 
+        return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
     }
 }
 
@@ -266,9 +265,9 @@ void TableManager::applyAssignments(
     for (const auto& [colName, newValue] : assignments) {
         int colIdx = -1;
         for (uint32_t c = 0; c < header.column_count; ++c) {
-            if (header.columns[c].name == colName) { 
-                colIdx = c; 
-                break; 
+            if (header.columns[c].name == colName) {
+                colIdx = c;
+                break;
             }
         }
         if (colIdx == -1) continue;
@@ -287,10 +286,8 @@ void TableManager::applyAssignments(
                     IndexKeyStr oldK{}, newK{};
                     std::memset(oldK.data, 0, TYPE_STR_SIZE);
                     std::memset(newK.data, 0, TYPE_STR_SIZE);
-                    
                     std::strncpy(oldK.data, row[colIdx].str_val.c_str(), TYPE_STR_SIZE - 1);
                     std::strncpy(newK.data, newValue.str_val.c_str(), TYPE_STR_SIZE - 1);
-                    
                     index.erase(oldK);
                     row[colIdx] = newValue;
                     index.insert(newK, rid);
@@ -300,7 +297,7 @@ void TableManager::applyAssignments(
                 row[colIdx] = newValue;
             }
         } catch (const DbException& e) {
-            throw; 
+            throw;
         } catch (...) {
         }
     }
@@ -310,9 +307,14 @@ Result TableManager::executeUpdate(
         const std::string& full_path,
         const ASTNode* cond,
         const std::vector<std::pair<std::string, Value>>& assignments) {
+
+    int fd_to_unlock = -1;
     try {
-        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
+        fd_to_unlock = pager.get_fd();
+
+        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
+
         TableHeader header;
         pager.read_page(0, &header).throw_if_error();
 
@@ -324,31 +326,38 @@ Result TableManager::executeUpdate(
             pager.read_page(rid.page_id, buf).throw_if_error();
 
             Row old_row = getRowFromSlot(buf, static_cast<uint16_t>(rid.slot_id), header);
-            if (old_row.empty()) return Result::Success(rid);
+            if (!old_row.empty()) {
+                Row updated_row = old_row;
+                bool h_changed = false;
 
-            Row updated_row = old_row;
-            bool h_changed = false;
+                applyAssignments(updated_row, assignments, header, pager, rid, h_changed);
+                handleRecordUpdate(pager, header, buf, rid.page_id,
+                                   static_cast<uint16_t>(rid.slot_id), updated_row, old_row);
 
-            applyAssignments(updated_row, assignments, header, pager, rid, h_changed);
-
-            handleRecordUpdate(pager, header, buf, rid.page_id, static_cast<uint16_t>(rid.slot_id), updated_row, old_row);
-            
-            pager.write_page(rid.page_id, buf).throw_if_error();
-            if (h_changed) {
-                pager.write_page(0, &header).throw_if_error();
+                pager.write_page(rid.page_id, buf).throw_if_error();
+                if (h_changed) pager.write_page(0, &header).throw_if_error();
             }
-            
+
+            TableLockManager::unlock_table(fd_to_unlock);
             return Result::Success(rid);
         }
 
-        if (idx_res.code == StatusCode::NOT_FOUND) return Result::Success();
+        if (idx_res.code == StatusCode::NOT_FOUND) {
+            TableLockManager::unlock_table(fd_to_unlock);
+            return Result::Success();
+        }
 
         int count = fullScanUpdate(pager, header, cond, assignments);
+        TableLockManager::unlock_table(fd_to_unlock);
         return {StatusCode::OK, "Updated " + std::to_string(count) + " rows"};
 
-    } 
-    catch (const DbException& e) { return Result::Error(e.code(), e.what()); }
-    catch (const std::exception& e) { return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); }
+    } catch (const DbException& e) {
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(e.code(), e.what());
+    } catch (const std::exception& e) {
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
+    }
 }
 
 int TableManager::fullScanUpdate(
@@ -373,7 +382,7 @@ int TableManager::fullScanUpdate(
             bool h_changed = false;
             applyAssignments(updated_row, assignments, header, pager, {p, i}, h_changed);
             handleRecordUpdate(pager, header, page_buffer, p, i, updated_row, old_row);
-            
+
             page_dirty = true;
             count++;
         }
@@ -386,11 +395,14 @@ int TableManager::fullScanUpdate(
     return count;
 }
 
-
 Result TableManager::executeDelete(const std::string& full_path, const ASTNode* cond) {
+    int fd_to_unlock = -1;
     try {
-        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
+        fd_to_unlock = pager.get_fd();
+
+        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
+
         TableHeader header;
         pager.read_page(0, &header).throw_if_error();
 
@@ -402,33 +414,41 @@ Result TableManager::executeDelete(const std::string& full_path, const ASTNode* 
             pager.read_page(rid.page_id, buf).throw_if_error();
 
             Row row = getRowFromSlot(buf, rid.slot_id, header);
-            if (row.empty()) return Result::Success({0,0}, "Deleted 0 rows (Already empty)");
+            if (row.empty()) {
+                TableLockManager::unlock_table(fd_to_unlock);
+                return Result::Success({0,0}, "Deleted 0 rows (Already empty)");
+            }
 
             clearIndicesForRow(pager, header, row);
 
             Slot* slots = get_slots(buf);
             slots[rid.slot_id].length = 0;
             slots[rid.slot_id].offset = 0;
-            
             recalc_free_space(get_hdr(buf));
 
             pager.write_page(rid.page_id, buf).throw_if_error();
             pager.write_page(0, &header).throw_if_error();
-            
+
+            TableLockManager::unlock_table(fd_to_unlock);
             return Result::Success({0,0}, "Deleted 1 row (Optimized via Index)");
-        } 
-        
+        }
+
         if (idx_res.code == StatusCode::NOT_FOUND) {
+            TableLockManager::unlock_table(fd_to_unlock);
             return Result::Success({0,0}, "Deleted 0 rows (Key not in index)");
         }
 
         int count = fullScanDelete(pager, header, cond);
-        
+        TableLockManager::unlock_table(fd_to_unlock);
         return Result::Success({0,0}, "Deleted " + std::to_string(count) + " rows (Full Scan)");
 
-    } 
-    catch (const DbException& e) { return Result::Error(e.code(), e.what()); }
-    catch (const std::exception& e) { return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); }
+    } catch (const DbException& e) {
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(e.code(), e.what());
+    } catch (const std::exception& e) {
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
+    }
 }
 
 int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNode* cond) {
@@ -438,7 +458,6 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNod
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         if (isIndexPage(header, p)) continue;
-
         if (!pager.read_page(p, page_buffer).isOk()) continue;
 
         bool page_dirty = false;
@@ -446,7 +465,6 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNod
 
         for (uint16_t i = 0; i < scount; ++i) {
             Row row = getRowFromSlot(page_buffer, i, header);
-            
             if (row.empty() || !matches(row, header, cond)) continue;
 
             clearIndicesForRow(pager, header, row);
@@ -454,7 +472,7 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNod
             Slot* slots = get_slots(page_buffer);
             slots[i].length = 0;
             slots[i].offset = 0;
-            
+
             page_dirty = true;
             count++;
         }
@@ -466,16 +484,11 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNod
         }
     }
 
-    if (h_changed) {
-        pager.write_page(0, &header).throw_if_error();
-    }
+    if (h_changed) pager.write_page(0, &header).throw_if_error();
     return count;
 }
 
-void TableManager::handleRecordUpdate(Pager& pager, TableHeader& header, char* page_buf, 
-                                      uint32_t p_id, uint16_t slot_id, 
-                                      const Row& new_row, const Row& old_row) {
-    
+void TableManager::handleRecordUpdate(Pager& pager, TableHeader& header, char* page_buf, uint32_t p_id, uint16_t slot_id, const Row& new_row, const Row& old_row) {
     std::vector<char> new_rec = RecordManager::serializeRowDynamic(new_row, header);
     uint16_t new_size = static_cast<uint16_t>(new_rec.size());
     auto* slots = get_slots(page_buf);
@@ -487,19 +500,17 @@ void TableManager::handleRecordUpdate(Pager& pager, TableHeader& header, char* p
     }
 
     RecordManager::compact_page(page_buf);
-
-    slots = get_slots(page_buf); 
+    slots = get_slots(page_buf);
 
     if (page_has_space(page_buf, new_size)) {
-        slots[slot_id].length = 0; slots[slot_id].offset = 0;
+        slots[slot_id].length = 0;
+        slots[slot_id].offset = 0;
 
         uint16_t temp_idx = write_record_to_page(page_buf, new_rec);
-
         slots[slot_id] = get_slots(page_buf)[temp_idx];
         get_slots(page_buf)[temp_idx].length = 0;
-        get_hdr(page_buf)->slot_count--; 
-    } 
-    else {
+        get_hdr(page_buf)->slot_count--;
+    } else {
         relocate_record(pager, header, page_buf, slot_id, new_rec, new_row, old_row);
     }
 }
@@ -530,8 +541,9 @@ uint16_t TableManager::write_record_to_page(char* page_buffer, const std::vector
     return slot_idx;
 }
 
-void TableManager::relocate_record(Pager& pager, TableHeader& header, char* cur_page, uint16_t slot_idx,
-                                  const std::vector<char>& new_rec, const Row& new_row, const Row& old_row) {
+void TableManager::relocate_record(Pager& pager, TableHeader& header, char* cur_page,
+                                    uint16_t slot_idx, const std::vector<char>& new_rec,
+                                    const Row& new_row, const Row& old_row) {
     clearIndicesForRow(pager, header, old_row);
 
     get_slots(cur_page)[slot_idx].length = 0;
@@ -539,7 +551,9 @@ void TableManager::relocate_record(Pager& pager, TableHeader& header, char* cur_
     recalc_free_space(get_hdr(cur_page));
 
     RecordID new_rid = findAvailableSlot(pager, header, static_cast<uint16_t>(new_rec.size()));
-    if (new_rid.page_id == 0) throw DbException(StatusCode::OUT_OF_MEMORY, "Update failed: no space");
+    if (new_rid.page_id == 0) {
+        throw DbException(StatusCode::OUT_OF_MEMORY, "Update failed: no space");
+    }
 
     alignas(PAGE_SIZE) char target_page[PAGE_SIZE];
     pager.read_page(new_rid.page_id, target_page).throw_if_error();

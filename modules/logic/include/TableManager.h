@@ -16,6 +16,8 @@ class TableManager {
 public:
     using OutputCallback = std::function<void(const std::string&)>;
 
+    static void setNodeId(int id);
+
     static Result executeSelect(const std::string& full_path,
                                const ASTNode* cond,
                                const std::vector<std::string>& selectedCols,
@@ -44,9 +46,7 @@ public:
 
     static bool matches(const Row& row, const TableHeader& header,
                         const ASTNode* node);
-
-    static bool evaluateLeaf(const Row& row, const TableHeader& header,
-                              const ASTNode* cond);
+ 
 
 private:
 
@@ -88,6 +88,14 @@ private:
     static void renderAggregates(const std::vector<AggregateRequest>& aggs,
                                  long long t_sum, int t_count,
                                  OutputCallback callback);
+
+    static bool executeRangeScan(Pager& pager, TableHeader& header,
+                                 const ASTNode* cond,
+                                 const std::vector<uint32_t>& colsToPrint,
+                                 const std::map<std::string, std::string>& aliases,
+                                 const std::vector<AggregateRequest>& aggs,
+                                 long long& t_sum, int& t_count, bool& first,
+                                 bool isAgg, OutputCallback callback);
 
     static RecordID findAvailableSlot(Pager& pager, TableHeader& header,
                                       uint16_t rec_size);

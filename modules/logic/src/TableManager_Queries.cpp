@@ -7,6 +7,8 @@
 #include <sstream>
 #include <cstring>
 
+extern int g_current_node_id;
+
 
 bool TableManager::matches(const Row& row, const TableHeader& header, const ASTNode* node) {
     if (!node) return true;
@@ -42,60 +44,7 @@ void TableManager::printRowAsJson(const Row& row, const TableHeader& header,
     isFirst = false;
     callback(out);
 }
-
-bool TableManager::executePointQuery(Pager& pager, TableHeader& header,
-                                      const ASTNode* cond, // Заменили на ASTNode
-                                      const std::vector<uint32_t>& colsToPrint,
-                                      const std::map<std::string, std::string>& aliases,
-                                      const std::vector<AggregateRequest>& aggs,
-                                      long long& t_sum, int& t_count, bool& first,
-                                      OutputCallback callback) {
-
-    auto comp_node = dynamic_cast<const ComparisonNode*>(cond);
-    if (!comp_node || (comp_node->op != "==" && comp_node->op != "=")) {
-        return false; 
-    }
-
-    int colIdx = findIndexForColumn(header, comp_node->column_name);
-    if (colIdx == -1) return false;
-
-    try {
-        Result res = searchInTree(pager, header, colIdx, comp_node->literal_value, rid);
-        bool isAgg = !aggs.empty();
-
-        if (res.isOk()) {
-            std::cerr << "[Optimizer] Point Query: record found via index\n";
-
-            alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-
-            pager.read_page(rid.page_id, buf).throw_if_error();
-
-            const Slot* slots = get_slots(buf);
-            const uint16_t scount = get_hdr(buf)->slot_count;
-
-            if (rid.slot_id < scount && slots[rid.slot_id].length > 0) {
-                const char* rec_ptr = buf + slots[rid.slot_id].offset;
-                Row row = RecordManager::extractRowDynamic(rec_ptr, header);
-
-                if (!isAgg) callback("[\n");
-                processRow(row, header, cond, aggs, colsToPrint, aliases, t_sum, t_count, first, isAgg, callback);
-                if (!isAgg) callback("\n]\n");
-            } else {
-
-                if (!isAgg) callback("[]\n");
-                else renderAggregates(aggs, 0, 0, callback);
-            }
-            return true; 
-        }
-    } 
-    catch (const DbException& e) {
-        std::cerr << "[Critical] Point Query I/O error: " << e.what() << ". Falling back to scan.\n";
-        return false; 
-    }
-
-    return false; 
-}
-
+ 
 void TableManager::applyAggregates(const Row& row, const TableHeader& header,
                                     const std::vector<AggregateRequest>& aggs,
                                     long long& total_sum, int& total_count) {
@@ -140,7 +89,6 @@ void TableManager::renderAggregates(const std::vector<AggregateRequest>& aggs,
     callback(oss.str());
 }
 
-
 void TableManager::processRow(const Row& row, const TableHeader& header,
                                const ASTNode* cond,
                                const std::vector<AggregateRequest>& aggs,
@@ -157,16 +105,13 @@ void TableManager::processRow(const Row& row, const TableHeader& header,
     }
 }
 
-
 std::vector<uint32_t> TableManager::getProjection(
         const TableHeader& header,
         const std::vector<std::string>& selectedCols) {
-
     std::vector<uint32_t> projection;
     if (selectedCols.empty()) {
-        for (uint32_t c = 0; c < header.column_count; ++c) {
+        for (uint32_t c = 0; c < header.column_count; ++c)
             projection.push_back(c);
-        }
     } else {
         for (const auto& sc : selectedCols) {
             for (uint32_t c = 0; c < header.column_count; ++c) {
@@ -179,14 +124,12 @@ std::vector<uint32_t> TableManager::getProjection(
     }
     return projection;
 }
-
-
+ 
 int TableManager::findIndexForColumn(const TableHeader& header,
                                       const std::string& colName) {
     for (uint32_t c = 0; c < header.column_count; ++c) {
-        if (colName == header.columns[c].name && header.columns[c].is_indexed) {
+        if (colName == header.columns[c].name && header.columns[c].is_indexed)
             return static_cast<int>(c);
-        }
     }
     return -1;
 }
@@ -212,6 +155,131 @@ Result TableManager::searchInTree(Pager& pager, TableHeader& header,
     }
 }
 
+bool TableManager::executePointQuery(Pager& pager, TableHeader& header,
+                                      const ASTNode* cond,
+                                      const std::vector<uint32_t>& colsToPrint,
+                                      const std::map<std::string, std::string>& aliases,
+                                      const std::vector<AggregateRequest>& aggs,
+                                      long long& t_sum, int& t_count, bool& first,
+                                      OutputCallback callback) {
+    auto comp_node = dynamic_cast<const ComparisonNode*>(cond);
+    if (!comp_node) return false;
+    if (comp_node->op != "==" && comp_node->op != "=") return false;
+
+    int colIdx = findIndexForColumn(header, comp_node->column_name);
+    if (colIdx == -1) return false;
+
+    RecordID rid;
+    Result res = searchInTree(pager, header, colIdx, comp_node->literal_value, rid);
+    bool isAgg = !aggs.empty();
+
+    std::cerr << "[Node " << g_current_node_id << "] Optimizer: Point Query on '"
+              << comp_node->column_name << "'\n";
+
+    if (res.isOk()) {
+        alignas(PAGE_SIZE) char buf[PAGE_SIZE];
+        pager.read_page(rid.page_id, buf).throw_if_error();
+
+        Row row = getRowFromSlot(buf, rid.slot_id, header);
+        if (!row.empty()) {
+            if (!isAgg) callback("[\n");
+            processRow(row, header, cond, aggs, colsToPrint, aliases,
+                       t_sum, t_count, first, isAgg, callback);
+            if (!isAgg) callback("\n]\n");
+        } else {
+            if (!isAgg) callback("[]\n");
+            else renderAggregates(aggs, 0, 0, callback);
+        }
+        return true;
+    }
+
+    if (!isAgg) callback("[]\n");
+    else renderAggregates(aggs, 0, 0, callback);
+    return true;
+}
+
+bool TableManager::executeRangeScan(Pager& pager, TableHeader& header,
+                                     const ASTNode* cond,
+                                     const std::vector<uint32_t>& colsToPrint,
+                                     const std::map<std::string, std::string>& aliases,
+                                     const std::vector<AggregateRequest>& aggs,
+                                     long long& t_sum, int& t_count, bool& first,
+                                     bool isAgg, OutputCallback callback) {
+    if (auto* between = dynamic_cast<const BetweenNode*>(cond)) {
+        int colIdx = findIndexForColumn(header, between->column_name);
+        if (colIdx == -1) return false;
+        if (header.root_page_ids[colIdx] == 0) return false;
+
+        std::cerr << "[Node " << g_current_node_id
+                  << "] Optimizer: Range Scan (BETWEEN) on '"
+                  << between->column_name << "'\n";
+
+        TablePageManager pm(pager, header);
+
+        auto processFunc = [&](const RecordID& rid) {
+            alignas(PAGE_SIZE) char buf[PAGE_SIZE];
+            if (!pager.read_page(rid.page_id, buf).isOk()) return;
+            Row row = getRowFromSlot(buf, rid.slot_id, header);
+            if (row.empty()) return;
+            processRow(row, header, cond, aggs, colsToPrint, aliases,
+                       t_sum, t_count, first, isAgg, callback);
+        };
+
+        if (header.columns[colIdx].type == static_cast<uint8_t>(DataType::INT)) {
+            BP_tree<int> tree(pager, header.root_page_ids[colIdx], pm);
+            tree.range_scan(between->low.int_val, between->high.int_val, processFunc);
+        } else {
+            BP_tree<IndexKeyStr> tree(pager, header.root_page_ids[colIdx], pm);
+            IndexKeyStr lo{}, hi{};
+            std::memset(lo.data, 0, TYPE_STR_SIZE);
+            std::memset(hi.data, 0, TYPE_STR_SIZE);
+            std::strncpy(lo.data, between->low.str_val.c_str(), TYPE_STR_SIZE - 1);
+            std::strncpy(hi.data, between->high.str_val.c_str(), TYPE_STR_SIZE - 1);
+            tree.range_scan(lo, hi, processFunc);
+        }
+        return true;
+    }
+
+    if (auto* comp = dynamic_cast<const ComparisonNode*>(cond)) {
+        if (comp->op != ">" && comp->op != ">=") return false;
+
+        int colIdx = findIndexForColumn(header, comp->column_name);
+        if (colIdx == -1) return false;
+        if (header.root_page_ids[colIdx] == 0) return false;
+
+        std::cerr << "[Node " << g_current_node_id
+                  << "] Optimizer: Range Scan (" << comp->op << ") on '"
+                  << comp->column_name << "'\n";
+
+        TablePageManager pm(pager, header);
+
+        auto processFunc = [&](const RecordID& rid) {
+            alignas(PAGE_SIZE) char buf[PAGE_SIZE];
+            if (!pager.read_page(rid.page_id, buf).isOk()) return;
+            Row row = getRowFromSlot(buf, rid.slot_id, header);
+            if (row.empty()) return;
+            processRow(row, header, cond, aggs, colsToPrint, aliases,
+                       t_sum, t_count, first, isAgg, callback);
+        };
+
+        if (header.columns[colIdx].type == static_cast<uint8_t>(DataType::INT)) {
+            BP_tree<int> tree(pager, header.root_page_ids[colIdx], pm);
+            int start = comp->literal_value.int_val;
+            if (comp->op == ">") start += 1;
+            tree.lower_bound_scan(start, processFunc);
+        } else {
+            BP_tree<IndexKeyStr> tree(pager, header.root_page_ids[colIdx], pm);
+            IndexKeyStr lo{};
+            std::memset(lo.data, 0, TYPE_STR_SIZE);
+            std::strncpy(lo.data, comp->literal_value.str_val.c_str(), TYPE_STR_SIZE - 1);
+            tree.lower_bound_scan(lo, processFunc);
+        }
+        return true;
+    }
+
+    return false;
+}
+
 
 void TableManager::fullScanSelect(Pager& pager, TableHeader& header,
                                    const ASTNode* cond,
@@ -220,29 +288,25 @@ void TableManager::fullScanSelect(Pager& pager, TableHeader& header,
                                    const std::map<std::string, std::string>& aliases,
                                    long long& t_sum, int& t_count, bool& first,
                                    bool isAgg, OutputCallback callback) {
-    std::cerr << "[Info] Full Table Scan (Slotted Pages)...\n";
+    std::cerr << "[Node " << g_current_node_id
+              << "] Full Table Scan (Slotted Pages)...\n";
 
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
         if (isIndexPage(header, p)) continue;
-
         if (!pager.read_page(p, page_buffer).isOk()) continue;
 
         const auto* phdr = get_hdr(page_buffer);
-
         for (uint16_t i = 0; i < phdr->slot_count; ++i) {
             Row row = getRowFromSlot(page_buffer, i, header);
-            
             if (row.empty()) continue;
-
             processRow(row, header, cond, aggs, colsToPrint, aliases,
                        t_sum, t_count, first, isAgg, callback);
         }
     }
 }
-
-
+ 
 void TableManager::executeTreeScan(Pager& pager, TableHeader& header,
                                     const ASTNode* cond,
                                     const std::vector<uint32_t>& colsToPrint,
@@ -251,27 +315,24 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header,
                                     long long& t_sum, int& t_count, bool& first,
                                     bool isAgg, OutputCallback callback) {
     int colIdx = -1;
-    if (cond && !cond->is_op) {
-        for (uint32_t c = 0; c < header.column_count; ++c) {
-            if (std::string(header.columns[c].name) == cond->column
-                && header.columns[c].is_indexed) {
-                colIdx = static_cast<int>(c);
-                break;
-            }
-        }
+    if (auto* comp = dynamic_cast<const ComparisonNode*>(cond)) {
+        colIdx = findIndexForColumn(header, comp->column_name);
+    } else if (auto* between = dynamic_cast<const BetweenNode*>(cond)) {
+        colIdx = findIndexForColumn(header, between->column_name);
     }
 
     if (colIdx != -1 && header.root_page_ids[colIdx] != 0) {
-        std::cerr << "[Optimizer] Index Scan on '" << header.columns[colIdx].name << "'\n";
+        std::cerr << "[Node " << g_current_node_id
+                  << "] Optimizer: Index Scan on '"
+                  << header.columns[colIdx].name << "'\n";
 
         TablePageManager pm(pager, header);
 
         auto processFunc = [&](const RecordID& rid) {
             alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-            pager.read_page(rid.page_id, buf).throw_if_error();
-
+            if (!pager.read_page(rid.page_id, buf).isOk()) return;
             Row row = getRowFromSlot(buf, rid.slot_id, header);
-            
+
             if (row.empty()) return;
 
             processRow(row, header, cond, aggs, colsToPrint, aliases,
@@ -290,60 +351,20 @@ void TableManager::executeTreeScan(Pager& pager, TableHeader& header,
                        t_sum, t_count, first, isAgg, callback);
     }
 }
-
-
-bool TableManager::executePointQuery(Pager& pager, TableHeader& header,
-                                      const ASTNode* cond,
-                                      const std::vector<uint32_t>& colsToPrint,
-                                      const std::map<std::string, std::string>& aliases,
-                                      const std::vector<AggregateRequest>& aggs,
-                                      long long& t_sum, int& t_count, bool& first,
-                                      OutputCallback callback) {
-    if (!cond || cond->is_op) return false;
-    if (cond->op != "==" && cond->op != "=") return false;
-
-    int colIdx = findIndexForColumn(header, cond->column);
-    if (colIdx == -1) return false;
-
-    RecordID rid;
-    Result res = searchInTree(pager, header, colIdx, cond->val1_parsed, rid);
-    bool isAgg = !aggs.empty();
-
-    if (res.isOk()) {
-        std::cerr << "[Optimizer] Point Query: record found via index\n";
-
-        alignas(PAGE_SIZE) char buf[PAGE_SIZE];
-        pager.read_page(rid.page_id, buf).throw_if_error();
-
-        Row row = getRowFromSlot(buf, rid.slot_id, header);
-
-        if (!row.empty()) {
-            if (!isAgg) callback("[\n");
-            processRow(row, header, cond, aggs, colsToPrint, aliases,
-                       t_sum, t_count, first, isAgg, callback);
-            if (!isAgg) callback("\n]\n");
-        } else {
-            if (!isAgg) callback("[]\n");
-            else renderAggregates(aggs, 0, 0, callback);
-        }
-        return true;
-    }
-
-    if (!isAgg) callback("[]\n");
-    else renderAggregates(aggs, 0, 0, callback);
-    return true;
-}
-
-
+  
 Result TableManager::executeSelect(const std::string& full_path,
                                    const ASTNode* cond,
                                    const std::vector<std::string>& selectedCols,
                                    const std::map<std::string, std::string>& aliases,
                                    const std::vector<AggregateRequest>& aggs,
                                    OutputCallback callback) {
+    int fd_to_unlock = -1;
     try {
-        std::shared_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
+        fd_to_unlock = pager.get_fd();
+
+        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/false);
+
         TableHeader header;
         pager.read_page(0, &header).throw_if_error();
 
@@ -353,19 +374,31 @@ Result TableManager::executeSelect(const std::string& full_path,
         bool      first   = true;
         auto colsToPrint = getProjection(header, selectedCols);
 
-        if (!executePointQuery(pager, header, cond, colsToPrint, aliases,
-                               aggs, t_sum, t_count, first, callback)) {
-            if (!isAgg) callback("[\n");
+        if (executePointQuery(pager, header, cond, colsToPrint, aliases,
+                              aggs, t_sum, t_count, first, callback)) {
+            if (isAgg) renderAggregates(aggs, t_sum, t_count, callback);
+            TableLockManager::unlock_table(fd_to_unlock);
+            return Result::Success();
+        }
+
+        if (!isAgg) callback("[\n");
+        bool used_range = executeRangeScan(pager, header, cond, colsToPrint, aliases,
+                                           aggs, t_sum, t_count, first, isAgg, callback);
+
+
+        if (!used_range) {
             executeTreeScan(pager, header, cond, colsToPrint, aliases,
                             aggs, t_sum, t_count, first, isAgg, callback);
-            if (!isAgg) callback("\n]\n");
         }
+        if (!isAgg) callback("\n]\n");
 
         if (isAgg) renderAggregates(aggs, t_sum, t_count, callback);
 
+        TableLockManager::unlock_table(fd_to_unlock);
         return Result::Success();
 
     } catch (const std::exception& e) {
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
     }
 }
@@ -380,9 +413,10 @@ bool TableManager::isIndexPage(const TableHeader& header, uint32_t page_id) {
 Row TableManager::getRowFromSlot(const char* page_buffer, uint16_t slot_id, const TableHeader& header) {
     const Slot* slots = get_slots(page_buffer);
     const PageHeader* phdr = get_hdr(page_buffer);
-    
-    if (slot_id >= phdr->slot_count || slots[slot_id].length == 0) {
-        return {}; 
-    }
-    return RecordManager::extractRowDynamic(page_buffer + slots[slot_id].offset, header);
+
+    if (slot_id >= phdr->slot_count || slots[slot_id].length == 0)
+        return {};
+
+    return RecordManager::extractRowDynamic(
+        page_buffer + slots[slot_id].offset, header);
 }
