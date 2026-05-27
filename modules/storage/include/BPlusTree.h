@@ -104,6 +104,8 @@ public:
     Result lower_bound(const tkey& key, RecordID& out_rid) const;
     Result upper_bound(const tkey& key, RecordID& out_rid) const;
     bool contains(const tkey& key) const;
+    void range_scan(const tkey& lo, const tkey& hi, std::function<void(const RecordID&)> callback) const;
+    void lower_bound_scan(const tkey& start, std::function<void(const RecordID&)> callback) const;
 
 private:
 
@@ -269,6 +271,87 @@ Result BP_tree<tkey, t, compare>::lower_bound(const tkey& key, RecordID& out_rid
 
 template <typename tkey, std::size_t t, typename compare>
 requires comparator<compare, tkey>
+void BP_tree<tkey, t, compare>::range_scan(const tkey& lo, const tkey& hi, std::function<void(const RecordID&)> callback) const
+{
+    if (_root_id == 0) return;
+
+    uint32_t curr_id = _root_id;
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+
+    while (true) {
+        _pager.read_page(curr_id, buffer).throw_if_error();
+        auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
+        if (base->_is_terminate) break;
+
+        auto* mid = reinterpret_cast<const bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, lo);
+        curr_id = mid->_pointers[idx];
+    }
+
+    alignas(PAGE_SIZE) char leaf_buf[PAGE_SIZE];
+    std::memcpy(leaf_buf, buffer, PAGE_SIZE);
+
+    while (true) {
+        auto* leaf = reinterpret_cast<const bptree_node_term*>(leaf_buf);
+
+        for (size_t i = 0; i < leaf->_count; ++i) {
+            const tkey& k = leaf->_data[i].first;
+
+            if (compare{}(k, lo)) continue;
+
+            if (!compare{}(k, hi) && !equal(k, lo) && (compare{}(hi, k) || equal(k, hi))) {
+                if (!compare{}(k, hi)) return;
+            }
+
+            callback(leaf->_data[i].second);
+        }
+
+        if (leaf->_next == 0) break;
+        uint32_t next_id = leaf->_next;
+        _pager.read_page(next_id, leaf_buf).throw_if_error();
+    }
+}
+
+template <typename tkey, std::size_t t, typename compare>
+requires comparator<compare, tkey>
+void BP_tree<tkey, t, compare>::lower_bound_scan(
+        const tkey& start,
+        std::function<void(const RecordID&)> callback) const
+{
+    if (_root_id == 0) return;
+
+    uint32_t curr_id = _root_id;
+    alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
+
+    while (true) {
+        _pager.read_page(curr_id, buffer).throw_if_error();
+        auto* base = reinterpret_cast<const bptree_node_base*>(buffer);
+        if (base->_is_terminate) break;
+
+        auto* mid = reinterpret_cast<const bptree_node_middle*>(buffer);
+        size_t idx = binary_search_in_node(base, start);
+        curr_id = mid->_pointers[idx];
+    }
+
+    alignas(PAGE_SIZE) char leaf_buf[PAGE_SIZE];
+    std::memcpy(leaf_buf, buffer, PAGE_SIZE);
+
+    while (true) {
+        auto* leaf = reinterpret_cast<const bptree_node_term*>(leaf_buf);
+
+        for (size_t i = 0; i < leaf->_count; ++i) {
+            if (compare{}(leaf->_data[i].first, start)) continue;
+            callback(leaf->_data[i].second);
+        }
+
+        if (leaf->_next == 0) break;
+        uint32_t next_id = leaf->_next;
+        _pager.read_page(next_id, leaf_buf).throw_if_error();
+    }
+}
+
+template <typename tkey, std::size_t t, typename compare>
+requires comparator<compare, tkey>
 Result BP_tree<tkey, t, compare>::upper_bound(const tkey& key, RecordID& out_rid) const 
 {
     if (_root_id == 0) {
@@ -388,13 +471,13 @@ void BP_tree<tkey, t, compare>::split_middle(uint32_t mid_id, uint32_t parent_id
         new_mid->_pointers[j] = old_mid->_pointers[i];
         j++;
     }
-    // ВАЖНО: не забываем последний указатель!
+
     new_mid->_pointers[j] = old_mid->_pointers[old_mid->_count];
     
     new_mid->_count = (uint32_t)j;
     old_mid->_count = (uint32_t)t - 1;
 
-    // Вставляем ключ и новый указатель в родителя
+    
     _pager.read_page(parent_id, p_buf).throw_if_error();
     auto* parent = reinterpret_cast<bptree_node_middle*>(p_buf);
     

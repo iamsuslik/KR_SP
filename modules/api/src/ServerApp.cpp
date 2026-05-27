@@ -6,6 +6,7 @@
 #include "Logger.h"
 #include "TableLockManager.h"
 #include "common.h"
+extern int g_current_node_id;
 
 #include <iostream>
 #include <vector>
@@ -74,6 +75,7 @@ static std::string extract_table_name(const std::string& query) {
 }
 
 [[noreturn]] static void worker_node_main(int node_id, SharedMemoryLayout* layout, AsyncManager& async) {
+    g_current_node_id = node_id;
     NodeControl& ctrl = layout->nodes[node_id];
 
     signal(SIGINT, SIG_IGN);
