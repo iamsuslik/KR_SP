@@ -3,6 +3,7 @@
 #include "RecordManager.h"
 #include "TablePageManager.h"
 #include "TableLockManager.h"
+#include "DbException.h"
 #include <iostream>
 #include <cstring>
 #include <filesystem>
@@ -86,13 +87,13 @@ void TableManager::updateIndices(Pager& pager, TableHeader& header,
 
         if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
             BP_tree<int> index(pager, header.root_page_ids[i], pm);
-            index.insert(row[i].int_val, rid);
+            index.insert(row[i].int_val, rid).throw_if_error();
         } else {
             BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm);
             IndexKeyStr key{};
             std::memset(key.data, 0, TYPE_STR_SIZE);
             std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-            index.insert(key, rid);
+            index.insert(key, rid).throw_if_error();
         }
         any_updated = true;
     }
@@ -112,13 +113,13 @@ void TableManager::clearIndicesForRow(Pager& pager, TableHeader& header,
 
         if (header.columns[i].type == static_cast<uint8_t>(DataType::INT)) {
             BP_tree<int> index(pager, header.root_page_ids[i], pm);
-            index.erase(row[i].int_val);
+            index.erase(row[i].int_val).throw_if_error();
         } else {
             BP_tree<IndexKeyStr> index(pager, header.root_page_ids[i], pm);
             IndexKeyStr key{};
             std::memset(key.data, 0, TYPE_STR_SIZE);
             std::strncpy(key.data, row[i].str_val.c_str(), TYPE_STR_SIZE - 1);
-            index.erase(key);
+            index.erase(key).throw_if_error();
         }
     }
 }

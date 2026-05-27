@@ -225,7 +225,7 @@ std::unique_ptr<Statement> SQLParser::parseStatement() {
     if (cmd == "AUTH")   return parseAuth();
     if (cmd == "ALTER")  return parseAlter();
     if (cmd == "GET")    return parseGet();
-    if (cmd == "REVERT") return parseRevert();
+    // if (cmd == "REVERT") return parseRevert();
 
     throw DbException(StatusCode::SYNTAX_ERROR,
                       "Неизвестная команда: '" + t.value + "'");

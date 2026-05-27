@@ -30,7 +30,7 @@ void TelemetryManager::recordQuery(long long duration_ms, bool is_error) {
     cleanup_unsafe();
 }
 
-double TelemetryManager::getCurrentRPS() const {
+double TelemetryManager::getCurrentRPS(int seconds) const {
     // Используем разделяемую блокировку (Read Lock)
     std::shared_lock lock(mtx);
     if (history.empty()) return 0.0;

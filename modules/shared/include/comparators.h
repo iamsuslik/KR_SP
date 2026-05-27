@@ -8,6 +8,14 @@
 
 struct IndexKeyStr {
     char data[TYPE_STR_SIZE];
+
+    bool operator<(const IndexKeyStr& other) const noexcept {
+        return std::strncmp(this->data, other.data, TYPE_STR_SIZE) < 0;
+    }
+
+    bool operator==(const IndexKeyStr& other) const noexcept {
+        return std::strncmp(this->data, other.data, TYPE_STR_SIZE) == 0;
+    }
 };
 
 template<typename Compare, typename Key>
@@ -17,7 +25,6 @@ concept comparator = requires(const Compare c, const Key& lhs, const Key& rhs) {
 
 template<typename T>
 consteval std::size_t get_optimal_t() {
-
     constexpr std::size_t overhead = 32;
     constexpr std::size_t pair_size = sizeof(T) + 8;
     constexpr std::size_t max_keys = (4096 - overhead) / (2 * pair_size);
@@ -30,7 +37,7 @@ struct IntComparator {
 
 struct StrComparator {
     bool operator()(const IndexKeyStr& lhs, const IndexKeyStr& rhs) const noexcept {
-        return std::strncmp(lhs.data, rhs.data, TYPE_STR_SIZE) < 0;
+        return lhs < rhs;
     }
 };
 

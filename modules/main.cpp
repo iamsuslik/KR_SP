@@ -9,12 +9,9 @@
 #include "TableManager.h"
 #include "SQLParser.h"
 #include "Logger.h"
-#include "TableLockManager.h" // ОБЯЗАТЕЛЬНО
+#include "AuthManager.h" 
+#include "TableLockManager.h"
 
-
-/**
- * Основной цикл выполнения команд
- */
 void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser, bool isInteractive) {
     std::string line;
     std::string buffer;
@@ -42,14 +39,15 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
                 std::cout << msg << std::flush;
             };
 
-            // Вызываем обновленный парсер (теперь он возвращает Result!)
-            Result res = parser.process(query, hm, print_to_screen);
+            Result res = parser.process(query, hm, -1, print_to_screen);
 
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-            // Логируем результат (Задание №7)
-            // Мы передаем статус SUCCESS или ERROR на основе Result
+            if (!res.isOk()) {
+                std::cerr << "\033[31m[SQL Error] " << res.details << "\033[0m" << std::endl;
+            }
+
             Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", duration);
 
             if (isInteractive) std::cout << std::endl;
@@ -60,17 +58,16 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
 }
 
 int main(int argc, char* argv[]) {
-    // Настройка окружения (можно добавить игнорирование сигналов, как в сервере)
     HierarchyManager hm;
     SQLParser parser;
 
     try {
+        AuthManager::initSystem(hm);
+
         if (argc == 1) {
-            // Интерактивный режим
             runQueryEngine(std::cin, hm, parser, true);
         } 
         else {
-            // Пакетный режим (скрипт)
             std::ifstream scriptFile(argv[1]);
             if (!scriptFile.is_open()) {
                 std::cerr << "\033[31m[Error] Could not open file: " << argv[1] << "\033[0m\n";
