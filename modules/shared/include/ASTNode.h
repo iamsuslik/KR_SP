@@ -8,12 +8,12 @@
 #include <functional>
 
 // Структура для агрегатных функций (SUM, COUNT, AVG)
-enum class AggregateType { NONE, SUM, COUNT, AVG };
-struct AggregateRequest {
-    AggregateType type;
-    std::string column;
-    std::string alias;
-};
+// enum class AggregateType { NONE, SUM, COUNT, AVG };
+// struct AggregateRequest {
+//     AggregateType type;
+//     std::string column;
+//     std::string alias;
+// };
 
 class ASTNode {
 public:

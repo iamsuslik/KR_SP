@@ -590,34 +590,34 @@ std::unique_ptr<Statement> SQLParser::parseGet() {
     return std::make_unique<GetTaskStatusStatement>(guid);
 }
 
-std::unique_ptr<Statement> SQLParser::parseRevert() {
-    consume();
+// std::unique_ptr<Statement> SQLParser::parseRevert() {
+//     consume();
 
-    std::string tableName =
-        expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после REVERT").value;
-    validateIdentifier(tableName, "REVERT");
-    if (peek().type == TokenType::DOT) {
-        consume();
-        const std::string part2 =
-            expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
-        validateIdentifier(part2, "REVERT (table part)");
-        tableName = tableName + "." + part2;
-    }
+//     std::string tableName =
+//         expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после REVERT").value;
+//     validateIdentifier(tableName, "REVERT");
+//     if (peek().type == TokenType::DOT) {
+//         consume();
+//         const std::string part2 =
+//             expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+//         validateIdentifier(part2, "REVERT (table part)");
+//         tableName = tableName + "." + part2;
+//     }
 
-    std::string timestamp;
-    while (peek().type != TokenType::SEMICOLON &&
-           peek().type != TokenType::END_OF_FILE) {
-        timestamp += consume().value;
-    }
-    match(TokenType::SEMICOLON);
+//     std::string timestamp;
+//     while (peek().type != TokenType::SEMICOLON &&
+//            peek().type != TokenType::END_OF_FILE) {
+//         timestamp += consume().value;
+//     }
+//     match(TokenType::SEMICOLON);
 
-    if (timestamp.empty())
-        throw DbException(StatusCode::SYNTAX_ERROR,
-                          "REVERT: ожидалась метка времени "
-                          "(формат: yyyy.mm.dd-hh:mm:ss.msmsms)");
+//     if (timestamp.empty())
+//         throw DbException(StatusCode::SYNTAX_ERROR,
+//                           "REVERT: ожидалась метка времени "
+//                           "(формат: yyyy.mm.dd-hh:mm:ss.msmsms)");
 
-    return std::make_unique<RevertStatement>(tableName, timestamp);
-}
+//     return std::make_unique<RevertStatement>(tableName, timestamp);
+// }
 
 std::unique_ptr<Statement> SQLParser::parseAlter() {
     consume();

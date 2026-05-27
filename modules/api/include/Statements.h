@@ -49,6 +49,13 @@ public:
           aggs_(std::move(a)), aliases_(std::move(al)) {}
 
     Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        std::string db_part = table_;
+        auto dot = table_.find('.');
+        if (dot != std::string::npos) db_part = table_.substr(0, dot);
+        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
+        auto auth = requireAccess(fd, db_part, "READ", hm);
+        if (!auth.isOk()) return auth;
+
         auto res = hm.resolveTablePath(table_);
         if (!res.isOk()) return res;
         return TableManager::executeSelect(
@@ -67,17 +74,35 @@ public:
                     std::vector<std::string> v)
         : table_(std::move(t)), targetCols_(std::move(c)), rawValues_(std::move(v)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+
+        std::string db_part = table_;
+        auto dot = table_.find('.');
+        if (dot != std::string::npos) {
+            db_part = table_.substr(0, dot);
+        } else if (g_async_manager) {
+            db_part = g_async_manager->get_session_db(fd);
+        }
+
+        auto auth = requireAccess(fd, db_part, "WRITE", hm);
+        if (!auth.isOk()) return auth;
+
         auto res = hm.resolveTablePath(table_);
         if (!res.isOk()) return res;
 
         TableHeader header;
-        Pager(res.path).read_page(0, &header).throw_if_error();
+
+        Result readRes = Pager(res.path).read_page(0, &header);
+        if (!readRes.isOk()) return readRes;
 
         Row finalRow(header.column_count, Value());
         SQLParser parser;
-        if (parser.prepareAndValidateRow(finalRow, header, targetCols_, rawValues_, cb))
-            return TableManager::insertRow(res.path, finalRow);
+
+        if (parser.prepareAndValidateRow(finalRow, header, targetCols_, rawValues_, cb)) {
+            Result insRes = TableManager::insertRow(res.path, finalRow);
+            if (insRes.isOk()) cb("[Success] 1 row inserted.\n");
+            return insRes;
+        }
 
         return Result::Error(StatusCode::INVALID_VALUE, "Ошибка валидации строки при вставке");
     }
@@ -148,6 +173,14 @@ public:
         : table_(std::move(t)), assignments_(std::move(a)), where_(std::move(w)) {}
 
     Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        std::string db_part = table_;
+        auto dot = table_.find('.');
+        if (dot != std::string::npos) db_part = table_.substr(0, dot);
+        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
+
+        auto auth = requireAccess(fd, db_part, "WRITE", hm);
+        if (!auth.isOk()) return auth;
+
         auto res = hm.resolveTablePath(table_);
         if (!res.isOk()) return res;
 
@@ -167,6 +200,14 @@ public:
         : table_(std::move(t)), where_(std::move(w)) {}
 
     Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        std::string db_part = table_;
+        auto dot = table_.find('.');
+        if (dot != std::string::npos) db_part = table_.substr(0, dot);
+        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
+
+        auto auth = requireAccess(fd, db_part, "WRITE", hm);
+        if (!auth.isOk()) return auth;
+
         auto res = hm.resolveTablePath(table_);
         if (!res.isOk()) return res;
 
@@ -314,6 +355,7 @@ public:
         if (AuthManager::authenticate(user_, pass_, hm)) {
 
             std::string token = AuthManager::createToken(user_);
+            if (g_async_manager) g_async_manager->set_session_user(fd, user_);
             cb("{\"status\":\"success\", \"token\":\"" + token + "\"}\n");
             return Result::Success();
         }
@@ -459,6 +501,21 @@ public:
         
         cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' отозваны.\n");
         return Result::Success();
+    }
+};
+
+class AuthJwtStatement : public Statement {
+    std::string token_;
+public:
+    explicit AuthJwtStatement(std::string t) : token_(std::move(t)) {}
+    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
+        try {
+            std::string user = AuthManager::verifyToken(token_);
+            cb("{\"status\":\"success\", \"user\":\"" + user + "\", \"msg\":\"JWT Auth OK\"}\n");
+            return Result::Success();
+        } catch (const std::exception& e) {
+            return Result::Error(StatusCode::AUTH_FAILED, e.what());
+        }
     }
 };
 

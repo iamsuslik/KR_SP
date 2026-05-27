@@ -6,8 +6,6 @@
 #include <cstring>
 #include <regex>
 
-constexpr int TYPE_STR_SIZE = 256;
-
 struct IndexKeyStr {
     char data[TYPE_STR_SIZE];
 };

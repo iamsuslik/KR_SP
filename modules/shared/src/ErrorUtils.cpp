@@ -1,4 +1,5 @@
 #include "ErrorUtils.h"
+#include "DbException.h"
 #include <iostream>
 
 std::string ErrorUtils::statusCodeToString(StatusCode code) {
@@ -36,4 +37,10 @@ void ErrorUtils::printError(const Result& res) {
     
     // Вывод в поток ошибок cerr с понятным префиксом
     std::cerr << "[DBMS Error] " << formatMessage(res) << std::endl;
+}
+
+void Result::throw_if_error() const {
+    if (code != StatusCode::OK) {
+        throw DbException(code, details);
+    }
 }
