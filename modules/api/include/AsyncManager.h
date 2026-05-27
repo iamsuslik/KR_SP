@@ -1,87 +1,42 @@
 #ifndef ASYNC_MANAGER_H
 #define ASYNC_MANAGER_H
 
-#include <string>
-#include <vector>
-#include <queue>
-#include <thread>
-#include <mutex>
-#include <shared_mutex> // Для высокопроизводительного чтения результатов
-#include <condition_variable>
-#include <unordered_map>
-#include <functional>
-#include <atomic>
 #include "common.h"
+#include <string>
 
-// Статусы асинхронной обработки
-enum class AsyncStatus {
-    PENDING,    // Ожидает в очереди
-    PROCESSING, // В процессе выполнения
-    COMPLETED,  // Выполнено успешно
-    FAILED      // Ошибка выполнения
-};
-
-// Контейнер результата запроса
 struct AsyncResult {
     AsyncStatus status;
-    std::string data;           // Тело ответа (JSON)
-    StatusCode db_code;         // Код возврата логики БД
-    std::string completion_time; // Метка времени завершения
+    std::string data;
+    StatusCode db_code;
+    std::string completion_time;
 };
 
 class AsyncManager {
 private:
-    struct AsyncTask {
-        std::string guid;
-        std::string query;
-    };
+    SharedMemoryLayout* shm = nullptr; 
+    size_t total_size = 0;
 
-    // Очередь задач (защищена обычным mutex)
-    std::queue<AsyncTask> task_queue;
-    std::mutex queue_mtx;
-    std::condition_variable cv;
-
-    // Реестр результатов (защищен shared_mutex для параллельного чтения)
-    std::unordered_map<std::string, AsyncResult> registry;
-    
-    std::vector<std::thread> pool;
-    std::atomic<bool> should_stop{false};
-
-    // Внутренние системные методы
     std::string generate_guid_v4();
-    void worker_loop();
+    SharedTaskSlot* find_free_slot();
 
 public:
-    // Колбэк-интерфейс для подключения SQLParser
-    using Processor = std::function<Result(const std::string&, std::function<void(const std::string&)>)>;
-    Processor db_engine;
-
-    explicit AsyncManager(size_t threads = 0);
+    AsyncManager();
     ~AsyncManager();
 
-    // Запрет копирования и перемещения (AsyncManager — уникальный ресурс сервера)
-    AsyncManager(const AsyncManager&) = delete;
-    AsyncManager& operator=(const AsyncManager&) = delete;
-
-    /**
-     * Постановка запроса в очередь. Возвращает уникальный идентификатор (GUID).
-     */
-    std::string enqueue(const std::string& query);
-
-    /**
-     * Получение текущего состояния и результата запроса по его GUID.
-     * Потокобезопасно, поддерживает параллельное чтение.
-     */
+    // Задачи (GUID v4)
+    std::string register_task();
+    void update_task(const std::string& guid, AsyncStatus status, StatusCode code, const std::string& result_json);
     AsyncResult fetch_result(const std::string& guid);
 
-    /**
-     * Очистка всей истории результатов.
-     */
-    void prune_results();
-    bool try_get_task(AsyncTask& task);
-    std::string get_query_text(const AsyncTask& task);
-    void process_and_finalize(AsyncTask& task, const std::string& query);
-    void update_registry(const std::string& guid, std::string buf, StatusCode sc);
+    // Сессии (IPC / fork)
+    void set_session_db(int fd, const std::string& db_name);
+    std::string get_session_db(int fd);
+    void close_session(int fd);
+
+    AsyncManager(const AsyncManager&) = delete;
+    AsyncManager& operator=(const AsyncManager&) = delete;
 };
+
+extern AsyncManager* g_async_manager;
 
 #endif

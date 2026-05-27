@@ -205,9 +205,14 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
 
 
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
+    int fd_to_unlock = -1; 
+
     try {
-        std::unique_lock<std::shared_mutex> lock(g_lock_manager.get_lock(full_path));
         Pager pager(full_path);
+        fd_to_unlock = pager.get_fd();
+
+        TableLockManager::lock_table(fd_to_unlock, true);
+
         TableHeader header;
         pager.read_page(0, &header).throw_if_error();
 
@@ -218,24 +223,37 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         uint16_t rec_size = static_cast<uint16_t>(rec.size());
 
         RecordID rid = findAvailableSlot(pager, header, rec_size);
-        if (rid.page_id == 0) {
-            throw DbException(StatusCode::OUT_OF_MEMORY, "No space left on disk");
-        }
+        if (rid.page_id == 0) throw DbException(StatusCode::OUT_OF_MEMORY, "No space");
 
         alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
         pager.read_page(rid.page_id, page_buffer).throw_if_error();
 
         rid.slot_id = write_record_to_page(page_buffer, rec);
-
         pager.write_page(rid.page_id, page_buffer).throw_if_error();
         pager.write_page(0, &header).throw_if_error();
 
+        for (uint32_t i = 0; i < header.column_count; ++i) {
+            if (header.columns[i].is_indexed && !row[i].is_null) {
+                if (row[i].str_val.size() >= TYPE_STR_SIZE) {
+                    TableLockManager::unlock_table(fd_to_unlock);
+                    return Result::Error(StatusCode::INVALID_VALUE, "Indexed string too long for static B-tree");
+                }
+            }
+        }
         updateIndices(pager, header, row, rid);
+
+        TableLockManager::unlock_table(fd_to_unlock);
 
         return Result::Success(rid, "1 row inserted.");
     } 
-    catch (const DbException& e) { return Result::Error(e.code(), e.what()); }
-    catch (const std::exception& e) { return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); }
+    catch (const DbException& e) { 
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(e.code(), e.what()); 
+    }
+    catch (const std::exception& e) { 
+        if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        return Result::Error(StatusCode::INTERNAL_ERROR, e.what()); 
+    }
 }
 
 void TableManager::applyAssignments(

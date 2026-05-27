@@ -8,6 +8,8 @@
 #include <memory>
 #include <stdexcept>
 #include <regex>
+#include <map>
+#include "comparators.h"
 
 constexpr int PAGE_SIZE = 4096;
 constexpr const int MAX_COLUMNS = 32;
@@ -15,16 +17,94 @@ constexpr const int MAX_FREE_PAGES = 100;
 constexpr const int MAX_NAME_LEN = 32;
 constexpr const int TYPE_STR_SIZE = 256; 
 constexpr const int TYPE_INT_SIZE = 4;
-constexpr const size_t PAGE_INTERNAL_RESERVE = 64;
 
 enum class TokenType {
-    IDENTIFIER, KEYWORD, LITERAL, OPERATOR, 
-    LPAREN, RPAREN, COMMA, SEMICOLON, STAR, END_OF_FILE
+    IDENTIFIER, 
+    KEYWORD, 
+    STRING_LITERAL, 
+    NUMBER, 
+    LPAREN,     // (
+    RPAREN,     // )
+    COMMA,      // ,
+    SEMICOLON,  // ;
+    STAR,       // *
+    DOT,        // . 
+    OPERATOR,   // =, !=, <, >, <=, >=
+    END_OF_FILE
 };
 
 struct Token {
     TokenType type;
     std::string value;
+};
+
+enum class AggregateType { NONE, SUM, COUNT, AVG };
+
+struct AggregateRequest {
+    AggregateType type;
+    std::string column;
+    std::string alias;
+};
+
+enum class StatusCode {
+    OK = 0,
+    IO_ERROR,
+    NOT_FOUND,
+    ALREADY_EXISTS,
+    OUT_OF_MEMORY,
+    TABLE_NOT_FOUND,
+    DATABASE_NOT_FOUND,
+    COLUMN_NOT_FOUND,
+    TYPE_MISMATCH,
+    DUPLICATE_KEY,
+    NOT_NULL_VIOLATION,
+    INVALID_VALUE,
+    SYNTAX_ERROR,
+    PERMISSION_DENIED, // Добавлено для RBAC
+    INTERNAL_ERROR,
+    TASK_PENDING
+};
+
+enum class DataType { INT, STR };
+
+struct Value {
+    DataType type;
+    int int_val = 0;
+    std::string str_val = "";
+    bool is_null = false;
+
+    Value() : type(DataType::INT), is_null(true) {}
+    explicit Value(int v) : type(DataType::INT), int_val(v), is_null(false) {}
+    explicit Value(std::string v) : type(DataType::STR), str_val(std::move(v)), is_null(false) {}
+
+    static bool compare(const Value& lhs, const Value& rhs, const std::string& op) {
+        if (lhs.is_null || rhs.is_null) return false;
+        if (lhs.type != rhs.type) return false; 
+
+        if (lhs.type == DataType::INT) {
+            return Engine::RelationalOp<int, IntComparator>::eval(lhs.int_val, rhs.int_val, op);
+        } else {
+            if (op == "LIKE") return Engine::StringUtils::matchLike(lhs.str_val, rhs.str_val);
+            return Engine::RelationalOp<std::string, std::less<std::string>>::eval(lhs.str_val, rhs.str_val, op);
+        }
+    }
+};
+
+struct ColumnDef {
+    std::string name;
+    DataType type;
+    bool is_indexed = false;
+    bool is_not_null = false;
+    bool has_default = false;
+    std::string default_value = "";
+
+    ColumnDef(std::string n, DataType t) : name(std::move(n)), type(t) {}
+};
+
+struct TableSchema {
+    std::string name;
+    std::vector<ColumnDef> columns;
+    TableSchema(std::string n, std::vector<ColumnDef> c) : name(std::move(n)), columns(std::move(c)) {}
 };
 
 struct RecordID {
@@ -43,123 +123,6 @@ struct Slot {
     uint16_t offset;
     uint16_t length;
 };
-#pragma pack(pop)
-
-enum class StatusCode {
-    OK = 0,
-    IO_ERROR,
-    NOT_FOUND,
-    ALREADY_EXISTS,
-    OUT_OF_MEMORY,
-    TABLE_NOT_FOUND,
-    DATABASE_NOT_FOUND,
-    COLUMN_NOT_FOUND,
-    TYPE_MISMATCH,
-    DUPLICATE_KEY,
-    NOT_NULL_VIOLATION,
-    INVALID_VALUE,
-    SYNTAX_ERROR,
-    INTERNAL_ERROR,
-    TASK_PENDING
-};
-
-class DbException : public std::runtime_error {
-private:
-    StatusCode _code;
-public:
-    DbException(StatusCode code, const std::string& msg) 
-        : std::runtime_error(msg), _code(code) {}
-    StatusCode code() const { return _code; }
-};
-
-enum class DataType { INT, STR };
-
-struct Value {
-    DataType type;
-    int int_val = 0;
-    std::string str_val = "";
-    bool is_null = false;
-
-    Value() : type(DataType::INT), is_null(true) {}
-    explicit Value(int v) : type(DataType::INT), int_val(v), is_null(false) {}
-    explicit Value(std::string v) : type(DataType::STR), str_val(std::move(v)), is_null(false) {}
-
-    static bool compare(const Value& lhs, const Value& rhs, const std::string& op) {
-        if (lhs.is_null || rhs.is_null) return false;
-
-        if (lhs.type == rhs.type) {
-            if (lhs.type == DataType::INT) {
-                return compareInts(lhs.int_val, rhs.int_val, op);
-            } else {
-                if (op == "LIKE") return matchLike(lhs.str_val, rhs.str_val);
-                return compareStrings(lhs.str_val, rhs.str_val, op);
-            }
-        }
-
-        try {
-            int l = (lhs.type == DataType::INT) ? lhs.int_val : std::stoi(lhs.str_val);
-            int r = (rhs.type == DataType::INT) ? rhs.int_val : std::stoi(rhs.str_val);
-            return compareInts(l, r, op);
-        } catch (...) {
-            return false; 
-        }
-    }
-
-private:
-    static bool compareInts(int a, int b, const std::string& op) {
-        if (op == "==" || op == "=") return a == b;
-        if (op == "!=") return a != b;
-        if (op == ">")  return a > b;
-        if (op == "<")  return a < b;
-        if (op == ">=") return a >= b;
-        if (op == "<=") return a <= b;
-        return false;
-    }
-
-    static bool compareStrings(const std::string& a, const std::string& b, const std::string& op) {
-        if (op == "==" || op == "=") return a == b;
-        if (op == "!=") return a != b;
-        if (op == ">")  return a > b;
-        if (op == "<")  return a < b;
-        if (op == ">=") return a >= b;
-        if (op == "<=") return a <= b;
-        return false;
-    }
-
-    static bool matchLike(const std::string& text, const std::string& pattern) {
-        try {
-            std::regex re(pattern);
-            return std::regex_match(text, re);
-        } catch (...) { return false; }
-    }
-};
-
-
-struct [[nodiscard]] Result {
-    StatusCode code = StatusCode::OK;
-    std::string details; 
-    RecordID rid = {0, 0};
-    std::string path = "";
-
-    bool isOk() const { return code == StatusCode::OK; }
-    
-    void throw_if_error() const {
-        if (code != StatusCode::OK) {
-            throw DbException(code, details);
-        }
-    }
-    static Result Success(RecordID r = {0,0}) { return {StatusCode::OK, "", r}; }
-    static Result Error(StatusCode c, std::string d = "") { return {c, std::move(d)}; }
-};
-
-
-#pragma pack(push, 1)
-struct IndexKeyStr {
-    char data[TYPE_STR_SIZE];
-    bool operator<(const IndexKeyStr& o) const { return std::strncmp(data, o.data, TYPE_STR_SIZE) < 0; }
-    bool operator>(const IndexKeyStr& o) const { return std::strncmp(data, o.data, TYPE_STR_SIZE) > 0; }
-    bool operator==(const IndexKeyStr& o) const { return std::strncmp(data, o.data, TYPE_STR_SIZE) == 0; }
-};
 
 struct ColumnSchema {
     char name[MAX_NAME_LEN];
@@ -170,9 +133,6 @@ struct ColumnSchema {
     char default_val[TYPE_STR_SIZE];
 };
 
-constexpr size_t HEADER_DATA_SIZE = (sizeof(uint32_t) * 3) + (sizeof(uint32_t) * MAX_FREE_PAGES) + (sizeof(uint32_t) * MAX_COLUMNS) + (sizeof(ColumnSchema) * MAX_COLUMNS);
-constexpr size_t HEADER_PADDING_SIZE = PAGE_SIZE - HEADER_DATA_SIZE;
-
 struct TableHeader {
     uint32_t column_count;
     uint32_t root_page_id;
@@ -180,17 +140,59 @@ struct TableHeader {
     uint32_t free_list[MAX_FREE_PAGES];
     uint32_t root_page_ids[MAX_COLUMNS];
     ColumnSchema columns[MAX_COLUMNS];
-    char padding[HEADER_PADDING_SIZE];
+    char padding[PAGE_SIZE - ((sizeof(uint32_t) * 3) + (sizeof(uint32_t) * MAX_FREE_PAGES) + (sizeof(uint32_t) * MAX_COLUMNS) + (sizeof(ColumnSchema) * MAX_COLUMNS))];
 };
-static_assert(sizeof(TableHeader) == 4096, "TableHeader size must be exactly 4096");
 #pragma pack(pop)
 
 using Row = std::vector<Value>;
 
-enum class AggregateType { NONE, COUNT, SUM, AVG };
-struct AggregateRequest {
-    AggregateType type;
-    std::string column;
+constexpr int MAX_SHARED_TASKS = 1000;
+constexpr int SHARED_RESULT_SIZE = 65536; 
+constexpr int MAX_SESSIONS = 1024;
+
+enum class AsyncStatus : int { PENDING = 0, PROCESSING = 1, COMPLETED = 2, FAILED = 3 };
+
+#pragma pack(push, 1)
+struct SharedTaskSlot {
+    char guid[37];
+    AsyncStatus status;
+    StatusCode db_code;
+    char result_data[SHARED_RESULT_SIZE];
+    char completion_time[26];
+    bool is_used;
+};
+
+struct SessionSlot {
+    int client_fd;
+    char current_db[MAX_NAME_LEN];
+    bool is_active;
+};
+
+struct SharedMemoryLayout {
+    SharedTaskSlot tasks[MAX_SHARED_TASKS];
+    SessionSlot sessions[MAX_SESSIONS];
+};
+#pragma pack(pop)
+
+struct [[nodiscard]] Result {
+    StatusCode code = StatusCode::OK;
+    std::string details; 
+    RecordID rid = {0, 0};
+    std::string path = "";
+
+    bool isOk() const { return code == StatusCode::OK; }
+    void throw_if_error() const {
+        if (code != StatusCode::OK) throw DbException(code, details);
+    }
+    static Result Success(RecordID r = {0,0}, std::string d = "") { return {StatusCode::OK, d, r}; }
+    static Result Error(StatusCode c, std::string d = "") { return {c, std::move(d)}; }
+};
+
+struct WorkerContext {
+    char guid[37];
+    char query[65536];
+    char current_db[MAX_NAME_LEN];
+    int client_fd;
 };
 
 #endif // COMMON_H

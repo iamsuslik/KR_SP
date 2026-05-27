@@ -1,121 +1,141 @@
 #include "AsyncManager.h"
 #include <random>
-#include <shared_mutex>
-#include <deque>
+#include <cstring>
+#include <chrono>
+#include <ctime>
+#include <iostream>
+#include <sys/mman.h>
 
-static constexpr size_t DEFAULT_THREADS = 4;
-static constexpr size_t MAX_THREADS = 16;
-static constexpr size_t MAX_REGISTRY_SIZE = 1000;
+AsyncManager::AsyncManager() {
 
-static std::shared_mutex registry_mtx;
-static std::deque<std::string> history_fifo;
+    total_size = sizeof(SharedTaskSlot) * MAX_SHARED_TASKS;
 
-AsyncManager::AsyncManager(size_t threads) {
-    if (threads == 0) {
-        threads = std::thread::hardware_concurrency();
-        if (threads == 0) threads = DEFAULT_THREADS;
-        else if (threads > MAX_THREADS) threads = MAX_THREADS; 
+    shared_array = (SharedTaskSlot*)mmap(NULL, total_size, 
+                                        PROT_READ | PROT_WRITE, 
+                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    if (shared_array == MAP_FAILED) {
+        perror("[Critical] mmap failed");
+        exit(EXIT_FAILURE);
     }
 
-    pool.reserve(threads);
-    for (size_t i = 0; i < threads; ++i) pool.emplace_back(&AsyncManager::worker_loop, this);
+    std::memset(shared_array, 0, total_size);
 }
 
 AsyncManager::~AsyncManager() {
-    should_stop = true;
-    cv.notify_all();
-    for (auto& w : pool) if (w.joinable()) w.join();
+    if (shared_array && shared_array != MAP_FAILED) {
+        munmap(shared_array, total_size);
+    }
 }
 
 std::string AsyncManager::generate_guid_v4() {
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
     std::uniform_int_distribution<uint32_t> dis(0, 0xFFFFFFFF);
-    uint32_t d[4] = {dis(gen), (dis(gen) & 0xFFFF0FFF) | 0x4000, (dis(gen) & 0x3FFFFFFF) | 0x80000000, dis(gen)};
+    
+    uint32_t d[4] = {dis(gen), (dis(gen) & 0xFFFF0FFF) | 0x4000, 
+                     (dis(gen) & 0x3FFFFFFF) | 0x80000000, dis(gen)};
+    
     char b[37];
-    std::snprintf(b, sizeof(b), "%08x-%04x-%04x-%04x-%08x%04x", d[0], d[1] >> 16, d[1] & 0xFFFF, d[2] >> 16, d[2] & 0xFFFF, d[3]);
+    std::snprintf(b, sizeof(b), "%08x-%04x-%04x-%04x-%08x%04x", 
+                 d[0], d[1] >> 16, d[1] & 0xFFFF, d[2] >> 16, d[2] & 0xFFFF, d[3]);
     return std::string(b);
 }
 
-std::string AsyncManager::enqueue(const std::string& query) {
+SharedTaskSlot* AsyncManager::find_free_slot() {
+    for (int i = 0; i < MAX_SHARED_TASKS; ++i) {
+        if (!shared_array[i].is_used) return &shared_array[i];
+    }
+    static int last_overwritten = 0;
+    last_overwritten = (last_overwritten + 1) % MAX_SHARED_TASKS;
+    return &shared_array[last_overwritten];
+}
+
+std::string AsyncManager::register_task() {
+    SharedTaskSlot* slot = find_free_slot();
     std::string guid = generate_guid_v4();
-    {
-        std::unique_lock lock(registry_mtx);
-        if (registry.size() >= MAX_REGISTRY_SIZE) {
-            registry.erase(history_fifo.front());
-            history_fifo.pop_front();
-        }
-        registry[guid] = {AsyncStatus::PENDING, "", StatusCode::OK, ""};
-        history_fifo.push_back(guid);
-    }
-    {
-        std::lock_guard<std::mutex> lock(queue_mtx);
-        task_queue.push({guid, query});
-    }
-    cv.notify_one();
+
+    std::memset(slot, 0, sizeof(SharedTaskSlot));
+    
+    std::strncpy(slot->guid, guid.c_str(), 36);
+    slot->status = AsyncStatus::PENDING;
+    slot->is_used = true;
+
     return guid;
 }
 
+void AsyncManager::update_task(const std::string& guid, AsyncStatus status, StatusCode code, const std::string& result_json) {
+    for (int i = 0; i < MAX_SHARED_TASKS; ++i) {
+        if (shared_array[i].is_used && std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0) {
+            
+            shared_array[i].status = status;
+            shared_array[i].db_code = code;
+
+            std::strncpy(shared_array[i].result_data, result_json.c_str(), SHARED_RESULT_SIZE - 1);
+            shared_array[i].result_data[SHARED_RESULT_SIZE - 1] = '\0';
+
+            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            char t_buf[26];
+            #ifdef _WIN32
+                ctime_s(t_buf, sizeof(t_buf), &now);
+            #else
+                ctime_r(&now, t_buf);
+            #endif
+            std::strncpy(shared_array[i].completion_time, t_buf, 25);
+            
+            return;
+        }
+    }
+}
+
 AsyncResult AsyncManager::fetch_result(const std::string& guid) {
-    std::shared_lock lock(registry_mtx);
-    return registry.count(guid) ? registry.at(guid) : AsyncResult{AsyncStatus::FAILED, "GUID_NOT_FOUND", StatusCode::NOT_FOUND, ""};
+    for (int i = 0; i < MAX_SHARED_TASKS; ++i) {
+        if (shared_array[i].is_used && std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0) {
+            return {
+                shared_array[i].status,
+                std::string(shared_array[i].result_data),
+                shared_array[i].db_code,
+                std::string(shared_array[i].completion_time)
+            };
+        }
+    }
+    return {AsyncStatus::FAILED, "GUID_NOT_FOUND", StatusCode::NOT_FOUND, ""};
 }
 
-void AsyncManager::worker_loop() {
-    while (true) {
-        AsyncTask task;
-        if (!try_get_task(task)) return;
-
-        std::string query = task.query; 
-        process_and_finalize(task, query);
+void AsyncManager::set_session_db(int fd, const std::string& db_name) {
+    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
+            std::strncpy(layout->sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+            return;
+        }
+    }
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (!layout->sessions[i].is_active) {
+            layout->sessions[i].client_fd = fd;
+            layout->sessions[i].is_active = true;
+            std::strncpy(layout->sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+            return;
+        }
     }
 }
 
-// Безопасное извлечение задачи из очереди
-bool AsyncManager::try_get_task(AsyncTask& task) {
-    std::unique_lock<std::mutex> lock(queue_mtx);
-    cv.wait(lock, [this] { return should_stop || !task_queue.empty(); });
-    
-    if (should_stop && task_queue.empty()) return false;
-    
-    task = std::move(task_queue.front());
-    task_queue.pop();
-    return true;
-}
-
-// Чтение данных
-std::string AsyncManager::get_query_text(const AsyncTask& task) {
-    return task.query;
-}
-
-// ЭВыполнение логики БД и отправка ответа в сокет
-void AsyncManager::process_and_finalize(AsyncTask& task, const std::string& query) {
-    std::string result_buffer;
-    StatusCode sc = StatusCode::OK;
-
-    // Выполняем SQL-запрос через движок
-    if (db_engine && !query.empty()) {
-        auto output_cb = [&](const std::string& s) { result_buffer += s; };
-        sc = db_engine(query, output_cb).code;
+std::string AsyncManager::get_session_db(int fd) {
+    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
+            return std::string(layout->sessions[i].current_db);
+        }
     }
-
-    update_registry(task.guid, std::move(result_buffer), sc);
+    return "";
 }
 
-// Обновление статуса и времени завершения
-void AsyncManager::update_registry(const std::string& guid, std::string buf, StatusCode sc) {
-    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    char t_buf[26];
-    #ifdef _WIN32
-        ctime_s(t_buf, sizeof(t_buf), &now);
-    #else
-        ctime_r(&now, t_buf);
-    #endif
-    std::string timestamp(t_buf);
-    if (!timestamp.empty()) timestamp.pop_back(); 
-
-    std::unique_lock lock(registry_mtx);
-    if (registry.count(guid)) {
-        registry[guid] = {AsyncStatus::COMPLETED, std::move(buf), sc, timestamp};
+void AsyncManager::close_session(int fd) {
+    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
+            layout->sessions[i].is_active = false;
+            return;
+        }
     }
 }

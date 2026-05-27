@@ -1,203 +1,106 @@
 #include "SQLParser.h"
-#include "ErrorUtils.h"
 #include "DbException.h"
-#include "common.h"
-#include <map>
-#include <stdexcept>
-#include <stack>
-#include <memory>
-#include <vector>
-#include <string>
+#include "Statements.h"
+#include "AsyncManager.h"
+#include "ErrorUtils.h"
+
 #include <algorithm>
-#include <iostream>
+#include <cctype>
+#include <charconv>
 #include <regex>
+#include <unordered_set>
+#include <stdexcept>
 
 std::string SQLParser::toUpper(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { 
-        return std::toupper(c); });
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
     return s;
 }
 
+bool SQLParser::isValidIdentifier(const std::string& name) {
+    if (name.empty()) return false;
+    if (std::isdigit(static_cast<unsigned char>(name[0]))) return false;
+    for (char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+            return false;
+    }
+    return true;
+}
 
-Value SQLParser::parseLiteral(const std::string& token) const{
-    if (token.empty()) return Value();
+void SQLParser::validateIdentifier(const std::string& name,
+                                   const std::string& context) const {
+    if (!isValidIdentifier(name))
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "Недопустимое имя '" + name + "' в контексте: " + context +
+                          ". Допустимы латинские буквы, цифры и '_'; не начинается с цифры.");
+}
 
-    if (token.size() >= 2 && token.front() == '"' && token.back() == '"') {
+Value SQLParser::parseLiteral(const std::string& token) {
+    if (token.empty() || toUpper(token) == "NULL")
+        return Value();
+
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
         return Value(token.substr(1, token.size() - 2));
-    }
 
-    try {
-        size_t pos;
-        int val = std::stoi(token, &pos);
-        if (pos == token.size()) return Value(val);
-    } catch (...) {
-        
-    }
+    int int_val = 0;
+    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), int_val);
+    if (ec == std::errc() && ptr == token.data() + token.size())
+        return Value(int_val);
 
     return Value(token);
 }
 
-bool SQLParser::isValidIdentifier(const std::string& name) {
-    if (name.empty() || name.size() > MAX_NAME_LEN) return false;
-    
-    static const std::regex pattern("^[a-zA-Z_][a-zA-Z0-9_]*$");
-    return std::regex_match(name, pattern);
-}
-
-int SQLParser::getPrecedence(const std::string& op) {
-    if (op == "OR")  return 1;
-    if (op == "AND") return 2;
-    if (op == "=" || op == "==" || op == ">" || op == "<" ||
-        op == "!=" || op == ">=" || op == "<=" ||
-        op == "LIKE" || op == "BETWEEN") return 3;
-    return 0;
-}
-
-std::shared_ptr<ExpressionNode> SQLParser::createLeaf(const std::string& token) {
-    auto leaf = std::make_shared<ExpressionNode>();
-    leaf->is_op = false;
-    
-    Value parsed = parseLiteral(token);
-    leaf->column = (parsed.type == DataType::STR) ? parsed.str_val : std::to_string(parsed.int_val);
-    return leaf;
-}
-
-
-void SQLParser::applyOperator(std::stack<std::shared_ptr<ExpressionNode>>& values,
-                               std::stack<std::string>& ops) {
-    if (ops.empty() || values.size() < 2) return;
-
-    std::string op = ops.top(); ops.pop();
-    auto right = values.top(); values.pop();
-    auto left = values.top(); values.pop();
-
-    auto node = std::make_shared<ExpressionNode>();
-    node->op = op;
-
-    if (op == "AND" || op == "OR") {
-        node->is_op = true;
-        node->left  = left;
-        node->right = right;
-    } else if (op == "BETWEEN") {
-        node->is_op = false;
-        node->column = left->column;
-        node->op = "BETWEEN";
-        node->val1_parsed = right->val1_parsed;
-        node->val2_parsed = right->val2_parsed;
-    } else {
-        node->is_op = false;
-        node->column = left->column;
-        node->val1 = right->column;
-        node->val1_parsed = parseLiteral(right->column);
-    }
-    values.push(node);
-}
-
-Token SQLParser::peek() const {
-    return token_stream[pos];
-}
-
-Token SQLParser::consume() {
-    return token_stream[pos++];
-}
-
-bool SQLParser::match(TokenType type, const std::string& val) {
-    if (pos >= token_stream.size()) return false;
-    if (token_stream[pos].type == type) {
-        if (val.empty() || toUpper(token_stream[pos].value) == toUpper(val)) {
-            pos++;
-            return true;
-        }
-    }
-    return false;
-}
-
-std::unique_ptr<ASTNode> SQLParser::parseExpression() {
-    auto node = parseAnd();
-    while (match(TokenType::KEYWORD, "OR")) {
-        auto right = parseAnd();
-        node = std::make_unique<LogicalNode>("OR", std::move(node), std::move(right));
-    }
-    return node;
-}
-
-std::unique_ptr<ASTNode> SQLParser::parseAnd() {
-    auto node = parsePrimary();
-    while (match(TokenType::KEYWORD, "AND")) {
-        auto right = parsePrimary();
-        node = std::make_unique<LogicalNode>("AND", std::move(node), std::move(right));
-    }
-    return node;
-}
-
-std::unique_ptr<ASTNode> SQLParser::parsePrimary() {
-    if (match(TokenType::LPAREN)) {
-        auto node = parseExpression();
-        match(TokenType::RPAREN);
-        return node;
-    }
-
-    Token col = consume(); 
-
-    if (match(TokenType::KEYWORD, "BETWEEN")) {
-        Value low = parseLiteral(consume().value);
-        match(TokenType::KEYWORD, "AND");
-        Value high = parseLiteral(consume().value);
-        return std::make_unique<BetweenNode>(col.value, low, high);
-    }
-
-    Token op = consume();
-    Value val = parseLiteral(consume().value);
-    return std::make_unique<ComparisonNode>(col.value, op.value, val);
-}
-
-std::vector<std::string> SQLParser::getLegacyTokens(const std::vector<Token>& tokens) {
-    std::vector<std::string> legacy;
-    for (const auto& t : tokens) {
-        if (t.type != TokenType::END_OF_FILE) {
-            legacy.push_back(t.value);
-        }
-    }
-    return legacy;
-}
 
 TokenType SQLParser::getTokenType(const std::string& value) const {
-    std::string up = toUpper(value);
-    static const std::unordered_set<std::string> keywords = {
+    if (value.empty()) return TokenType::IDENTIFIER;
+
+    static const std::unordered_set<std::string> kKeywords = {
         "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUE", "VALUES",
-        "CREATE", "TABLE", "DATABASE", "DROP", "USE", "UPDATE", "SET", 
-        "DELETE", "AND", "OR", "BETWEEN", "LIKE", "INT", "STR", 
-        "NOT_NULL", "INDEXED", "AS", "SUM", "COUNT", "AVG", "DEFAULT"
+        "CREATE", "TABLE", "DATABASE", "DROP", "USE", "UPDATE", "SET",
+        "DELETE", "AND", "OR", "NOT", "BETWEEN", "LIKE",
+        "INT", "STR",
+        "NOT_NULL", "INDEXED", "DEFAULT",
+        "AS", "NULL",
+        "SUM", "COUNT", "AVG",
+        "AUTH", "USER", "ALTER", "GRANT", "REVOKE",
+        "GROUP", "PERMISSION", "PERMISSIONS",
+        "GET", "REVERT", "TO", "ADD", "REMOVE"
     };
 
-    if (keywords.count(up)) return TokenType::KEYWORD;
-    if (value.front() == '"') return TokenType::LITERAL;
-    if (std::isdigit(static_cast<unsigned char>(value[0]))) return TokenType::LITERAL;
+    const std::string up = toUpper(value);
+    if (kKeywords.count(up)) return TokenType::KEYWORD;
+    if (value.front() == '"')return TokenType::STRING_LITERAL;
     
+    if (std::isdigit(static_cast<unsigned char>(value[0])) ||(value[0] == '-' && value.size() > 1 && std::isdigit(static_cast<unsigned char>(value[1])))){
+        return TokenType::NUMBER;
+    }
+
     return TokenType::IDENTIFIER;
 }
 
 std::vector<Token> SQLParser::lex(const std::string& query) {
     std::vector<Token> result;
+    result.reserve(64);
+
     std::string current;
     bool inQuotes = false;
 
-    auto pushCurrent = [&]() {
+    auto pushToken = [&]() {
         if (current.empty()) return;
         result.push_back({getTokenType(current), current});
         current.clear();
     };
 
-    for (size_t i = 0; i < query.length(); ++i) {
-        char c = query[i];
+    for (std::size_t i = 0; i < query.size(); ++i) {
+        const char c = query[i];
 
         if (c == '"') {
             if (inQuotes) {
                 current += c;
-                pushCurrent();
+                pushToken();
                 inQuotes = false;
             } else {
-                pushCurrent();
+                pushToken();
                 inQuotes = true;
                 current += c;
             }
@@ -205,29 +108,21 @@ std::vector<Token> SQLParser::lex(const std::string& query) {
         }
         if (inQuotes) { current += c; continue; }
 
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            pushCurrent();
-            continue;
-        }
+        if (std::isspace(static_cast<unsigned char>(c))) { pushToken(); continue; }
 
-        if (c == ',' || c == '(' || c == ')' || c == ';' || c == '*') {
-            pushCurrent();
-            TokenType type;
-            if (c == ',') type = TokenType::COMMA;
-            else if (c == '(') type = TokenType::LPAREN;
-            else if (c == ')') type = TokenType::RPAREN;
-            else if (c == ';') type = TokenType::SEMICOLON;
-            else type = TokenType::STAR;
-            result.push_back({type, std::string(1, c)});
-            continue;
-        }
+        if (c == ',') { pushToken(); result.push_back({TokenType::COMMA,","}); continue; }
+        if (c == '(') { pushToken(); result.push_back({TokenType::LPAREN,"("}); continue; }
+        if (c == ')') { pushToken(); result.push_back({TokenType::RPAREN,")"}); continue; }
+        if (c == ';') { pushToken(); result.push_back({TokenType::SEMICOLON, ";"}); continue; }
+        if (c == '.') { pushToken(); result.push_back({TokenType::DOT,"."}); continue; }
+        if (c == '*') { pushToken(); result.push_back({TokenType::STAR, "*"}); continue; }
 
         if (c == '=' || c == '<' || c == '>' || c == '!') {
-            pushCurrent();
+            pushToken();
             std::string op(1, c);
-            if (i + 1 < query.length() && query[i + 1] == '=') {
-                op += "=";
-                i++;
+            if (i + 1 < query.size() && query[i + 1] == '=') {
+                op += '=';
+                ++i;
             }
             result.push_back({TokenType::OPERATOR, op});
             continue;
@@ -235,101 +130,77 @@ std::vector<Token> SQLParser::lex(const std::string& query) {
 
         current += c;
     }
-
-    pushCurrent();
+    pushToken();
     result.push_back({TokenType::END_OF_FILE, ""});
     return result;
 }
 
-Result SQLParser::validateTokenCase(const std::vector<std::string>& tokens, OutputCallback callback) {
-    for (const auto& t : tokens) {
-        if (t.empty() || t.front() == '"') continue;
-
-        bool hasUpper = false;
-        bool hasLower = false;
-        for (char c : t) {
-            if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
-            if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
-        }
-
-        if (hasUpper && hasLower) {
-            std::string msg = "[Error] Mixed case in word '" + t + "' is forbidden.\n";
-            callback(msg);
-            return Result::Error(StatusCode::SYNTAX_ERROR, msg);
-        }
-    }
-    return Result::Success();
+Token SQLParser::peek() const {
+    if (pos < token_stream.size()) return token_stream[pos];
+    return {TokenType::END_OF_FILE, ""};
 }
 
-Result SQLParser::handleDrop(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 3) {
-        return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete DROP command");
-    }
-
-    std::string sub = toUpper(tokens[1]);
-    Result final_res; 
-
-    try {
-        if (sub == "TABLE") {
-            auto res = hm.resolveTablePath(tokens[2]);
-            res.throw_if_error();  
-            
-            final_res = TableManager::dropTable(res.path);
-        } 
-        else if (sub == "DATABASE") {
-            final_res = hm.dropDatabase(tokens[2]);
-        } 
-        else {
-            return Result::Error(StatusCode::SYNTAX_ERROR, "Unknown DROP target: " + sub);
-        }
-
-        final_res.throw_if_error();
-        
-        callback("[Success] " + final_res.details + "\n");
-        return final_res;
-        
-    } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
-    }
+Token SQLParser::peekAhead(std::size_t offset) const {
+    const std::size_t idx = pos + offset;
+    if (idx < token_stream.size()) return token_stream[idx];
+    return {TokenType::END_OF_FILE, ""};
 }
 
+Token SQLParser::consume() {
+    if (pos < token_stream.size()) return token_stream[pos++];
+    return {TokenType::END_OF_FILE, ""};
+}
 
-Result SQLParser::process(const std::string& query, HierarchyManager& hm, OutputCallback callback) {
+bool SQLParser::match(TokenType type, const std::string& val) {
+    const Token t = peek();
+    if (t.type != type) return false;
+    if (!val.empty() && toUpper(t.value) != toUpper(val)) return false;
+    consume();
+    return true;
+}
+
+Token SQLParser::expect(TokenType type, const std::string& errMsg) {
+    const Token t = peek();
+    if (t.type != type)
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          errMsg + " (получено: '" + t.value + "')");
+    return consume();
+}
+
+Result SQLParser::process(const std::string& query,
+                          HierarchyManager& hm,
+                          int client_fd,
+                          OutputCallback cb) {
     try {
-        this->pos = 0;
-        this->token_stream = lex(query);
+        if (g_async_manager) {
+            const std::string active_db = g_async_manager->get_session_db(client_fd);
+            if (!active_db.empty()) { auto _r2 = hm.useDatabase(active_db); (void)_r2; }
+        }
 
-        if (token_stream.empty() || token_stream[0].type == TokenType::END_OF_FILE) {
+        token_stream = lex(query);
+        pos = 0;
+
+        if (token_stream.empty() || peek().type == TokenType::END_OF_FILE)
             return Result::Success();
+
+        for (const auto& tok : token_stream) {
+            if (tok.type != TokenType::KEYWORD) continue;
+            bool hasUpper = false, hasLower = false;
+            for (char c : tok.value) {
+                if (std::isupper(static_cast<unsigned char>(c))) hasUpper = true;
+                if (std::islower(static_cast<unsigned char>(c))) hasLower = true;
+            }
+            if (hasUpper && hasLower)
+                return Result::Error(StatusCode::SYNTAX_ERROR,
+                                     "Запрещён смешанный регистр в ключевом слове: '" +
+                                     tok.value + "'");
         }
 
-        std::vector<std::string> legacy_tokens = getLegacyTokens(token_stream);
+        auto stmt = parseStatement();
+        if (!stmt)
+            return Result::Error(StatusCode::SYNTAX_ERROR, "Пустой запрос");
 
-        if (legacy_tokens.empty() || legacy_tokens[0].front() == '[') return Result::Success(); 
-
-        validateTokenCase(legacy_tokens, callback).throw_if_error();
-
-        std::string cmd = toUpper(legacy_tokens[0]);
-
-        if (cmd == "CREATE") {
-            if (legacy_tokens.size() < 2) return Result::Error(StatusCode::SYNTAX_ERROR, "Incomplete CREATE");
-            std::string sub = toUpper(legacy_tokens[1]);
-            if (sub == "DATABASE") return handleCreateDatabase(legacy_tokens, hm, callback);
-            if (sub == "TABLE")    return handleCreateTable(legacy_tokens, hm, callback);
-        }
-        
-        if (cmd == "USE")    return handleUse(legacy_tokens, hm, callback);
-        if (cmd == "INSERT") return handleInsert(legacy_tokens, hm, callback);
-        if (cmd == "SELECT") return handleSelect(legacy_tokens, hm, callback);
-        if (cmd == "DELETE") return handleDelete(legacy_tokens, hm, callback);
-        if (cmd == "UPDATE") return handleUpdate(legacy_tokens, hm, callback);
-        if (cmd == "DROP")   return handleDrop(legacy_tokens, hm, callback);
-
-        std::string err = "[Error] Unknown command: " + legacy_tokens[0] + "\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+        return stmt->execute(hm, client_fd, cb);
 
     } catch (const DbException& e) {
         return Result::Error(e.code(), e.what());
@@ -338,405 +209,655 @@ Result SQLParser::process(const std::string& query, HierarchyManager& hm, Output
     }
 }
 
-std::vector<std::string> SQLParser::getWhereTokens(const std::vector<std::string>& tokens) const {
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (toUpper(tokens[i]) == "WHERE") {
-            return std::vector<std::string>(tokens.begin() + i + 1, tokens.end());
-        }
-    }
-    return {};
+std::unique_ptr<Statement> SQLParser::parseStatement() {
+    const Token t = peek();
+    if (t.type == TokenType::END_OF_FILE) return nullptr;
+
+    const std::string cmd = toUpper(t.value);
+
+    if (cmd == "SELECT") return parseSelect();
+    if (cmd == "INSERT") return parseInsert();
+    if (cmd == "UPDATE") return parseUpdate();
+    if (cmd == "DELETE") return parseDelete();
+    if (cmd == "CREATE") return parseCreate();
+    if (cmd == "DROP")   return parseDrop();
+    if (cmd == "USE")    return parseUse();
+    if (cmd == "AUTH")   return parseAuth();
+    if (cmd == "ALTER")  return parseAlter();
+    if (cmd == "GET")    return parseGet();
+    if (cmd == "REVERT") return parseRevert();
+
+    throw DbException(StatusCode::SYNTAX_ERROR,
+                      "Неизвестная команда: '" + t.value + "'");
 }
 
-Result SQLParser::handleCreateDatabase(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 3) {
-        std::string err = "[Error] Syntax error. Expected: CREATE DATABASE [database_name];\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+std::unique_ptr<Statement> SQLParser::parseSelect() {
+    consume();
+
+    std::vector<std::string>              selectedCols;
+    std::vector<AggregateRequest>         aggs;
+    std::map<std::string, std::string>    aliases;
+
+    const Result projRes = parseProjection(selectedCols, aggs, aliases);
+    if (!projRes.isOk())
+        throw DbException(projRes.code, projRes.details);
+
+    expect(TokenType::KEYWORD, "Ожидалось ключевое слово FROM");
+
+    std::string tableName = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+    validateIdentifier(tableName, "FROM");
+
+    if (peek().type == TokenType::DOT) {
+        consume();
+        const std::string part2 = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+        validateIdentifier(part2, "FROM (table part)");
+        tableName = tableName + "." + part2;
     }
 
-    try {
-        Result res = hm.createDatabase(tokens[2]);
-        res.throw_if_error(); 
+    std::unique_ptr<ASTNode> whereClause;
+    if (match(TokenType::KEYWORD, "WHERE"))
+        whereClause = parseExpression();
 
-        callback("[Success] " + res.details + "\n");
-        return res;
+    match(TokenType::SEMICOLON);
 
-    } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
-    }
+    return std::make_unique<SelectStatement>(
+        tableName, selectedCols, std::move(whereClause), aggs, aliases);
 }
 
-Result SQLParser::handleUse(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 2) {
-        std::string err = "[Error] Syntax error. Expected: USE [database_name];\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
-    }
+Result SQLParser::parseProjection(std::vector<std::string>& selectedCols,
+                                  std::vector<AggregateRequest>& aggs,
+                                  std::map<std::string, std::string>& aliases) {
+    if (match(TokenType::STAR)) return Result::Success();
 
-    try {
-        Result res = hm.useDatabase(tokens[1]);
-        res.throw_if_error();
+    auto parseOneColumn = [&]() {
+        const Token t  = peek();
+        const std::string up = toUpper(t.value);
 
-        callback("[Success] " + res.details + "\n");
-        return res;
+        if (up == "SUM" || up == "COUNT" || up == "AVG") {
+            consume();
+            expect(TokenType::LPAREN, "Ожидалось '(' после агрегатной функции " + up);
 
-    } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err_res) + "\n");
-        return err_res;
-    }
-}
-
-Result SQLParser::parseColumnDefinitions(const std::vector<std::string>& tokens, size_t& i, std::vector<ColumnDef>& outCols) {
-    while (i < tokens.size() && tokens[i] != ")") {
-        if (i + 1 >= tokens.size()) return Result::Error(StatusCode::SYNTAX_ERROR, "Unexpected end of column list");
-
-        std::string colName = tokens[i++];
-        std::string colTypeStr = toUpper(tokens[i++]);
-        
-        DataType type = (colTypeStr == "INT") ? DataType::INT : DataType::STR;
-        ColumnDef cd(colName, type);
-
-        while (i < tokens.size() && tokens[i] != "," && tokens[i] != ")") {
-            std::string flag = toUpper(tokens[i++]);
-            
-            if (flag == "INDEXED") {
-                cd.is_indexed = true;
-            } else if (flag == "NOT_NULL") {
-                cd.is_not_null = true;
-            } else if (flag == "DEFAULT") {
-                cd.has_default = true;
-                if (i < tokens.size()) {
-                    cd.default_value = tokens[i++];
-                }
+            std::string arg;
+            if (up == "COUNT" && match(TokenType::STAR)) {
+                arg = "*";
+            } else {
+                arg = expect(TokenType::IDENTIFIER,
+                             "Ожидалось имя колонки внутри " + up + "(...)").value;
+                validateIdentifier(arg, up + "(...)");
             }
-        }
-        
-        outCols.push_back(cd);
+            expect(TokenType::RPAREN, "Ожидалось ')' после аргумента " + up);
 
-        if (i < tokens.size() && tokens[i] == ",") {
-            ++i;
+            std::string alias = up + "(" + arg + ")";
+            if (match(TokenType::KEYWORD, "AS"))
+                alias = expect(TokenType::IDENTIFIER, "Ожидалось имя псевдонима").value;
+
+            AggregateType type =
+                (up == "SUM")   ? AggregateType::SUM :
+                (up == "AVG")   ? AggregateType::AVG :
+                                  AggregateType::COUNT;
+            aggs.push_back({type, arg, alias});
+
+        } else {
+            const std::string name =
+                expect(TokenType::IDENTIFIER, "Ожидалось имя колонки").value;
+            validateIdentifier(name, "SELECT-список");
+
+            std::string alias = name;
+            if (match(TokenType::KEYWORD, "AS")) {
+                alias = expect(TokenType::IDENTIFIER, "Ожидалось имя псевдонима").value;
+                validateIdentifier(alias, "AS-псевдоним");
+            }
+            selectedCols.push_back(name);
+            if (alias != name) aliases[name] = alias;
         }
-    }
+    };
+
+    parseOneColumn();
+    while (match(TokenType::COMMA))
+        parseOneColumn();
+
     return Result::Success();
 }
 
-Result SQLParser::handleCreateTable(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 6) {
-        std::string err = "[Error] Syntax error. Expected: CREATE TABLE table_name (col1 type [flags], ...);\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
+std::unique_ptr<Statement> SQLParser::parseInsert() {
+    consume();
+    expect(TokenType::KEYWORD, "Ожидалось INTO после INSERT");
+
+    std::string tableName = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+    validateIdentifier(tableName, "INSERT INTO");
+    if (peek().type == TokenType::DOT) {
+        consume();
+        const std::string part2 = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+        validateIdentifier(part2, "INSERT INTO (table part)");
+        tableName = tableName + "." + part2;
     }
 
-    try {
-        std::string tableName = tokens[2];
-        Result res = hm.resolveTablePath(tableName);
+    std::vector<std::string> columns;
+    if (match(TokenType::LPAREN)) {
+        do {
+            const std::string col =
+                expect(TokenType::IDENTIFIER, "Ожидалось имя колонки").value;
+            validateIdentifier(col, "INSERT (column list)");
+            columns.push_back(col);
+        } while (match(TokenType::COMMA));
+        expect(TokenType::RPAREN, "Ожидалось ')' после списка колонок");
+    }
 
-        if (res.code == StatusCode::DATABASE_NOT_FOUND) {
-            res.throw_if_error();
-        }
+    if (match(TokenType::KEYWORD, "VALUE") || match(TokenType::KEYWORD, "VALUES")) {
+        expect(TokenType::LPAREN, "Ожидалось '(' перед значениями");
+        std::vector<std::string> values;
+        do {
+            values.push_back(consume().value);
+        } while (match(TokenType::COMMA));
+        expect(TokenType::RPAREN, "Ожидалось ')' после значений");
+        match(TokenType::SEMICOLON);
+        return std::make_unique<InsertStatement>(tableName, columns, values);
+    }
 
-        if (res.isOk()) {
-            throw DbException(StatusCode::ALREADY_EXISTS, "Table '" + tableName + "' already exists.");
+    if (toUpper(peek().value) == "SELECT") {
+        auto subquery = parseSelect();
+        match(TokenType::SEMICOLON);
+        return std::make_unique<InsertSelectStatement>(
+            tableName, columns, std::move(subquery));
+    }
+
+    throw DbException(StatusCode::SYNTAX_ERROR,
+                      "Ожидалось VALUE или SELECT после INSERT INTO");
+}
+
+std::unique_ptr<Statement> SQLParser::parseUpdate() {
+    consume();
+
+    std::string tableName = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+    validateIdentifier(tableName, "UPDATE");
+    if (peek().type == TokenType::DOT) {
+        consume();
+        const std::string part2 = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+        validateIdentifier(part2, "UPDATE (table part)");
+        tableName = tableName + "." + part2;
+    }
+
+    expect(TokenType::KEYWORD, "Ожидалось SET после имени таблицы в UPDATE");
+
+    std::vector<std::pair<std::string, Value>> assignments;
+
+    auto parseAssignment = [&]() {
+        const std::string col =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя колонки в SET").value;
+        validateIdentifier(col, "SET");
+        expect(TokenType::OPERATOR, "Ожидался оператор '=' после имени колонки");
+        assignments.emplace_back(col, parseLiteral(consume().value));
+    };
+
+    parseAssignment();
+    while (match(TokenType::COMMA))
+        parseAssignment();
+
+    std::unique_ptr<ASTNode> whereClause;
+    if (match(TokenType::KEYWORD, "WHERE"))
+        whereClause = parseExpression();
+
+    match(TokenType::SEMICOLON);
+    return std::make_unique<UpdateStatement>(
+        tableName, std::move(assignments), std::move(whereClause));
+}
+
+std::unique_ptr<Statement> SQLParser::parseDelete() {
+    consume();
+    expect(TokenType::KEYWORD, "Ожидалось FROM после DELETE");
+
+    std::string tableName = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+    validateIdentifier(tableName, "DELETE FROM");
+    if (peek().type == TokenType::DOT) {
+        consume();
+        const std::string part2 = expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+        validateIdentifier(part2, "DELETE FROM (table part)");
+        tableName = tableName + "." + part2;
+    }
+
+    std::unique_ptr<ASTNode> whereClause;
+    if (match(TokenType::KEYWORD, "WHERE"))
+        whereClause = parseExpression();
+
+    match(TokenType::SEMICOLON);
+    return std::make_unique<DeleteStatement>(tableName, std::move(whereClause));
+}
+
+std::unique_ptr<Statement> SQLParser::parseUse() {
+    consume();
+    const std::string dbName = expect(TokenType::IDENTIFIER, "Ожидалось имя базы данных").value;
+    validateIdentifier(dbName, "USE");
+    match(TokenType::SEMICOLON);
+    return std::make_unique<UseStatement>(dbName);
+}
+
+std::unique_ptr<Statement> SQLParser::parseCreate() {
+    consume();
+    const std::string target = toUpper(peek().value);
+
+    if (target == "DATABASE") {
+        consume();
+        const std::string dbName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя базы данных").value;
+        validateIdentifier(dbName, "CREATE DATABASE");
+        match(TokenType::SEMICOLON);
+        return std::make_unique<CreateDbStatement>(dbName);
+    }
+
+    if (target == "USER") {
+        consume();
+        const std::string user =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя пользователя").value;
+        validateIdentifier(user, "CREATE USER");
+        const std::string pass = consume().value;
+        match(TokenType::SEMICOLON);
+        return std::make_unique<CreateUserStatement>(user, pass);
+    }
+
+    if (target == "TABLE") {
+        consume();
+
+        std::string tableName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+        validateIdentifier(tableName, "CREATE TABLE");
+        if (peek().type == TokenType::DOT) {
+            consume();
+            const std::string part2 =
+                expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+            validateIdentifier(part2, "CREATE TABLE (table part)");
+            tableName = tableName + "." + part2;
         }
 
         std::vector<ColumnDef> cols;
-        size_t index = 4;
-        parseColumnDefinitions(tokens, index, cols).throw_if_error();
+        const Result colRes = parseColumnDefinitions(cols);
+        if (!colRes.isOk())
+            throw DbException(colRes.code, colRes.details);
 
-        Result create_res = TableManager::createTable(res.path, TableSchema(tableName, cols));
-        create_res.throw_if_error();
-        
-        callback("[Success] Table '" + tableName + "' created successfully.\n");
-        return create_res;
+        if (cols.empty())
+            throw DbException(StatusCode::SYNTAX_ERROR,
+                              "CREATE TABLE: таблица должна иметь хотя бы одну колонку");
 
-    } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + std::string(e.what()) + "\n");
-        return err_res;
+        match(TokenType::SEMICOLON);
+        return std::make_unique<CreateTableStatement>(tableName, std::move(cols));
     }
+
+    throw DbException(StatusCode::SYNTAX_ERROR,
+                      "Ожидалось DATABASE, TABLE или USER после CREATE, получено: '" +
+                      peek().value + "'");
 }
 
-Result SQLParser::handleInsert(const std::vector<std::string>& tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (tokens.size() < 5) {
-        std::string err = "[Error] Syntax error. Expected: INSERT INTO [table] (cols) VALUE (vals);\n";
-        callback(err);
-        return Result::Error(StatusCode::SYNTAX_ERROR, err);
-    }
+Result SQLParser::parseColumnDefinitions(std::vector<ColumnDef>& outCols) {
+    expect(TokenType::LPAREN, "Ожидалось '(' перед списком колонок");
 
-    try {
-        Result res = hm.resolveTablePath(tokens[2]);
-        res.throw_if_error();
+    do {
+        const std::string colName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя колонки").value;
+        validateIdentifier(colName, "определение колонки");
 
-        TableHeader header;
-        try {
-            Pager(res.path).read_page(0, &header).throw_if_error();
-        } catch (...) {
-            throw DbException(StatusCode::IO_ERROR, "Failed to read table schema from disk.");
-        }
+        const std::string colTypeStr =
+            toUpper(expect(TokenType::KEYWORD,
+                           "Ожидался тип колонки INT или STR").value);
+        if (colTypeStr != "INT" && colTypeStr != "STR")
+            throw DbException(StatusCode::SYNTAX_ERROR,
+                              "Неизвестный тип колонки '" + colTypeStr +
+                              "'. Допустимы INT и STR.");
 
-        std::vector<std::string> targetCols;
-        size_t valStart = findValueStartIndex(tokens, targetCols);
-        auto rawValues = collectValuesFromTokens(tokens, valStart);
+        ColumnDef cd(colName,
+                     colTypeStr == "INT" ? DataType::INT : DataType::STR);
 
-        Row finalRow(header.column_count, Value());
-
-        if (!prepareAndValidateRow(finalRow, header, targetCols, rawValues, callback)) {
-            return Result::Error(StatusCode::INVALID_VALUE, "Row validation failed");
-        }
-            
-        Result insert_res = TableManager::insertRow(res.path, finalRow);
-        insert_res.throw_if_error();
-
-        callback("[Success] " + insert_res.details + "\n");
-        return insert_res;
-
-    } catch (const DbException& e) {
-        Result err_res = Result::Error(e.code(), e.what());
-        callback("[Error] " + ErrorUtils::formatMessage(err) + "\n");
-        return err_res;
-    }
-}
-
-size_t SQLParser::findKeyword(const std::vector<std::string>& tokens, const std::string& keyword) {
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (toUpper(tokens[i]) == keyword) return i;
-    }
-    return std::string::npos;
-}
-
-Result SQLParser::parseProjection(const std::vector<std::string>& tokens, size_t fromIdx, 
-                                 std::vector<std::string>& selectedCols, 
-                                 std::vector<AggregateRequest>& aggs, 
-                                 std::map<std::string, std::string>& aliases) {
-    if (fromIdx == 2 && tokens[1] == "*") return Result::Success();
-
-    for (size_t i = 1; i < fromIdx; ++i) {
-        std::string token = toUpper(tokens[i]);
-        if (token == ",") continue;
-
-        if (token == "SUM" || token == "COUNT" || token == "AVG") {
-            if (i + 3 < fromIdx && tokens[i+1] == "(" && tokens[i+3] == ")") {
-                AggregateType type = (token == "SUM") ? AggregateType::SUM : 
-                                    (token == "COUNT") ? AggregateType::COUNT : AggregateType::AVG;
-                aggs.push_back({type, tokens[i+2]});
-                i += 3; 
-                continue;
+        bool parsing_flags = true;
+        while (parsing_flags && peek().type == TokenType::KEYWORD) {
+            const std::string flag = toUpper(peek().value);
+            if (flag == "INDEXED") {
+                consume();
+                cd.is_indexed  = true;
+                cd.is_not_null = true;
+            } else if (flag == "NOT_NULL") {
+                consume();
+                cd.is_not_null = true;
+            } else if (flag == "DEFAULT") {
+                consume();
+                const Token defTok = consume();
+                cd.has_default   = true;
+                cd.default_value = defTok.value;
+            } else {
+                parsing_flags = false;
             }
         }
+        outCols.push_back(std::move(cd));
+    } while (match(TokenType::COMMA));
 
-        if (toUpper(tokens[i]) == "AS") {
-            if (i + 1 < fromIdx) {
-                std::string alias = tokens[i+1];
-                if (alias.front() == '"') alias = alias.substr(1, alias.size() - 2);
-                if (!selectedCols.empty()) aliases[selectedCols.back()] = alias;
-                ++i;
-            }
-        } else {
-            selectedCols.push_back(tokens[i]);
-        }
-    }
+    expect(TokenType::RPAREN, "Ожидалось ')' после списка колонок");
     return Result::Success();
 }
 
-Result SQLParser::handleSelect(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
-    size_t fromIdx = findKeyword(legacy_tokens, "FROM");
-    if (fromIdx == std::string::npos || fromIdx + 1 >= legacy_tokens.size()) {
-        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: SELECT ... FROM [table_name]");
+std::unique_ptr<Statement> SQLParser::parseDrop() {
+    consume();
+    const std::string target = toUpper(peek().value);
+
+    if (target == "DATABASE") {
+        consume();
+        const std::string dbName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя базы данных").value;
+        validateIdentifier(dbName, "DROP DATABASE");
+        match(TokenType::SEMICOLON);
+        return std::make_unique<DropDbStatement>(dbName);
     }
 
-    std::string tableName = legacy_tokens[fromIdx + 1];
-    std::vector<std::string> selectedCols;
-    std::vector<AggregateRequest> aggs;
-    std::map<std::string, std::string> aliases;
-
-    try {
-        parseProjection(legacy_tokens, fromIdx, selectedCols, aggs, aliases).throw_if_error();
-
-        auto res = hm.resolveTablePath(tableName);
-        res.throw_if_error();
-
-        std::unique_ptr<ASTNode> root_node = nullptr;
-        for (size_t i = 0; i < token_stream.size(); ++i) {
-            if (token_stream[i].type == TokenType::KEYWORD && toUpper(token_stream[i].value) == "WHERE") {
-                this->pos = i + 1;
-                root_node = parseExpression();
-                break;
-            }
+    if (target == "TABLE") {
+        consume();
+        std::string tableName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы").value;
+        validateIdentifier(tableName, "DROP TABLE");
+        if (peek().type == TokenType::DOT) {
+            consume();
+            const std::string part2 =
+                expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+            validateIdentifier(part2, "DROP TABLE (table part)");
+            tableName = tableName + "." + part2;
         }
-
-        return TableManager::executeSelect(res.path, root_node.get(), selectedCols, aliases, aggs, callback);
-
-    } catch (const DbException& e) {
-        return Result::Error(e.code(), e.what());
+        match(TokenType::SEMICOLON);
+        return std::make_unique<DropTableStatement>(tableName);
     }
+
+    throw DbException(StatusCode::SYNTAX_ERROR,
+                      "Ожидалось DATABASE или TABLE после DROP, получено: '" +
+                      peek().value + "'");
 }
 
-Result SQLParser::handleDelete(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (legacy_tokens.size() < 3 || toUpper(legacy_tokens[1]) != "FROM") {
-        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: DELETE FROM [table_name] <WHERE...>");
-    }
-
-    try {
-        auto res = hm.resolveTablePath(legacy_tokens[2]);
-        res.throw_if_error();
-
-        std::unique_ptr<ASTNode> root_node = nullptr;
-        for (size_t i = 0; i < token_stream.size(); ++i) {
-            if (token_stream[i].type == TokenType::KEYWORD && toUpper(token_stream[i].value) == "WHERE") {
-                this->pos = i + 1;
-                root_node = parseExpression();
-                break;
-            }
-        }
-
-        Result del_res = TableManager::executeDelete(res.path, root_node.get());
-        del_res.throw_if_error();
-
-        callback("[Success] " + del_res.details + "\n");
-        return del_res;
-
-    } catch (const DbException& e) {
-        return Result::Error(e.code(), e.what());
-    }
+std::unique_ptr<Statement> SQLParser::parseAuth() {
+    consume();
+    const std::string user =
+        expect(TokenType::IDENTIFIER, "Ожидалось имя пользователя").value;
+    const std::string pass = consume().value;
+    match(TokenType::SEMICOLON);
+    return std::make_unique<AuthStatement>(user, pass);
 }
 
-Result SQLParser::handleUpdate(const std::vector<std::string>& legacy_tokens, HierarchyManager& hm, OutputCallback callback) {
-    if (legacy_tokens.size() < 6 || toUpper(legacy_tokens[2]) != "SET") {
-        return Result::Error(StatusCode::SYNTAX_ERROR, "Expected: UPDATE [table] SET col=val <WHERE...>");
+std::unique_ptr<Statement> SQLParser::parseGet() {
+    consume();
+    std::string guid;
+    while (peek().type != TokenType::SEMICOLON &&
+           peek().type != TokenType::END_OF_FILE) {
+        guid += consume().value;
     }
-
-    try {
-        auto res = hm.resolveTablePath(legacy_tokens[1]);
-        res.throw_if_error();
-
-        std::vector<std::pair<std::string, Value>> assignments;
-        size_t i = 3; 
-        
-        while (i < legacy_tokens.size() && toUpper(legacy_tokens[i]) != "WHERE") {
-            if (legacy_tokens[i] == ",") { i++; continue; }
-            
-            if (i + 2 < legacy_tokens.size() && legacy_tokens[i+1] == "=") {
-                assignments.emplace_back(legacy_tokens[i], parseLiteral(legacy_tokens[i+2]));
-                i += 3;
-            } else {
-                break; 
-            }
-        }
-
-        if (assignments.empty()) return Result::Error(StatusCode::SYNTAX_ERROR, "No assignments found");
-
-        std::unique_ptr<ASTNode> root_node = nullptr;
-        for (size_t k = 0; k < token_stream.size(); ++k) {
-            if (token_stream[k].type == TokenType::KEYWORD && toUpper(token_stream[k].value) == "WHERE") {
-                this->pos = k + 1;
-                root_node = parseExpression();
-                break;
-            }
-        }
-
-        Result upd_res = TableManager::executeUpdate(res.path, root_node.get(), assignments);
-        upd_res.throw_if_error();
-
-        callback("[Success] " + upd_res.details + "\n");
-        return upd_res;
-
-    } catch (const DbException& e) {
-        return Result::Error(e.code(), e.what());
-    }
+    match(TokenType::SEMICOLON);
+    if (guid.empty())
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "GET: ожидался GUID задачи");
+    return std::make_unique<GetTaskStatusStatement>(guid);
 }
 
-size_t SQLParser::findValueStartIndex(const std::vector<std::string>& tokens, std::vector<std::string>& outColNames) const {
-    size_t i = 3;
+std::unique_ptr<Statement> SQLParser::parseRevert() {
+    consume();
 
-    if (i < tokens.size() && tokens[i] == "(") {
-        ++i;
-        while (i < tokens.size() && tokens[i] != ")") {
-            if (tokens[i] != ",") {
-                outColNames.push_back(tokens[i]);
-            }
-            ++i;
-        }
-        if (i < tokens.size()){ 
-            ++i;
-        }
+    std::string tableName =
+        expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после REVERT").value;
+    validateIdentifier(tableName, "REVERT");
+    if (peek().type == TokenType::DOT) {
+        consume();
+        const std::string part2 =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя таблицы после '.'").value;
+        validateIdentifier(part2, "REVERT (table part)");
+        tableName = tableName + "." + part2;
     }
 
-    while (i < tokens.size() && toUpper(tokens[i]) != "VALUE") {
-        ++i;
+    std::string timestamp;
+    while (peek().type != TokenType::SEMICOLON &&
+           peek().type != TokenType::END_OF_FILE) {
+        timestamp += consume().value;
     }
-    
-    if (i + 1 < tokens.size() && tokens[i+1] == "(") {
-        return i + 2; 
-    }
+    match(TokenType::SEMICOLON);
 
-    return std::string::npos; 
+    if (timestamp.empty())
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "REVERT: ожидалась метка времени "
+                          "(формат: yyyy.mm.dd-hh:mm:ss.msmsms)");
+
+    return std::make_unique<RevertStatement>(tableName, timestamp);
 }
 
-std::vector<std::string> SQLParser::collectValuesFromTokens(const std::vector<std::string>& tokens, size_t startIdx) const {
-    std::vector<std::string> values;
-    
-    if (startIdx == std::string::npos || startIdx >= tokens.size()) {
-        return values;
+std::unique_ptr<Statement> SQLParser::parseAlter() {
+    consume();
+    const std::string target = toUpper(peek().value);
+
+    if (target == "USER") {
+        consume();
+        const std::string username =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя пользователя").value;
+        validateIdentifier(username, "ALTER USER");
+
+        if (match(TokenType::KEYWORD, "ADD")) {
+            if (match(TokenType::KEYWORD, "TO")) {
+                expect(TokenType::KEYWORD, "Ожидалось GROUP");
+                const std::string dbName =
+                    expect(TokenType::IDENTIFIER, "Ожидалось имя БД").value;
+                validateIdentifier(dbName, "ADD TO GROUP (db)");
+                const std::string groupName =
+                    expect(TokenType::IDENTIFIER, "Ожидалось имя группы").value;
+                validateIdentifier(groupName, "ADD TO GROUP (group)");
+                match(TokenType::SEMICOLON);
+                return std::make_unique<AlterUserAddToGroupStatement>(
+                    username, dbName, groupName);
+            }
+
+            if (toUpper(peek().value) == "PERMISSION" ||
+                toUpper(peek().value) == "PERMISSIONS") {
+                consume();
+                const std::string dbName =
+                    expect(TokenType::IDENTIFIER, "Ожидалось имя БД").value;
+                validateIdentifier(dbName, "ADD PERMISSION (db)");
+                auto perms = parseIdentifierList();
+                match(TokenType::SEMICOLON);
+                return std::make_unique<AlterUserAddPermStatement>(
+                    username, dbName, std::move(perms));
+            }
+        }
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "ALTER USER: неизвестное действие");
     }
 
-    for (size_t i = startIdx; i < tokens.size() && tokens[i] != ")"; ++i) {
-        if (tokens[i] != ",") {
-            values.push_back(tokens[i]);
+    if (target == "GROUP") {
+        consume();
+        const std::string groupName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя группы").value;
+        validateIdentifier(groupName, "ALTER GROUP");
+
+        if (match(TokenType::KEYWORD, "FROM")) {
+            const bool isAdd = toUpper(peek().value) == "ADD";
+            if (!isAdd && toUpper(peek().value) != "DELETE")
+                throw DbException(StatusCode::SYNTAX_ERROR,
+                                  "ALTER GROUP FROM: ожидалось ADD или DELETE");
+            consume();
+
+            if (toUpper(peek().value) != "PERMISSION" &&
+                toUpper(peek().value) != "PERMISSIONS")
+                throw DbException(StatusCode::SYNTAX_ERROR,
+                                  "ALTER GROUP FROM ADD/DELETE: ожидалось PERMISSION");
+            consume();
+
+            const std::string dbName =
+                expect(TokenType::IDENTIFIER, "Ожидалось имя БД").value;
+            validateIdentifier(dbName, "ALTER GROUP (db)");
+            auto perms = parseIdentifierList();
+            match(TokenType::SEMICOLON);
+
+            if (isAdd)
+                return std::make_unique<AlterGroupAddPermStatement>(
+                    groupName, dbName, std::move(perms));
+            else
+                return std::make_unique<AlterGroupDelPermStatement>(
+                    groupName, dbName, std::move(perms));
         }
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "ALTER GROUP: неизвестное действие");
     }
-    return values;
+
+    if (target == "DATABASE") {
+        consume();
+        const std::string dbName =
+            expect(TokenType::IDENTIFIER, "Ожидалось имя БД").value;
+        validateIdentifier(dbName, "ALTER DATABASE");
+
+        if (match(TokenType::KEYWORD, "ADD")) {
+            if (match(TokenType::KEYWORD, "GROUP")) {
+                const std::string gName =
+                    expect(TokenType::IDENTIFIER, "Ожидалось имя группы").value;
+                validateIdentifier(gName, "ALTER DATABASE ADD GROUP");
+                match(TokenType::SEMICOLON);
+                return std::make_unique<AlterDbAddGroupStatement>(dbName, gName);
+            }
+        }
+        throw DbException(StatusCode::SYNTAX_ERROR,
+                          "ALTER DATABASE: неизвестное действие");
+    }
+
+    throw DbException(StatusCode::SYNTAX_ERROR,
+                      "Ожидалось USER, GROUP или DATABASE после ALTER, получено: '" +
+                      peek().value + "'");
+}
+
+std::vector<std::string> SQLParser::parseIdentifierList() {
+    expect(TokenType::LPAREN, "Ожидалось '(' перед списком");
+
+    std::vector<std::string> list;
+    do {
+        const std::string id =
+            expect(TokenType::IDENTIFIER, "Ожидался идентификатор в списке").value;
+        validateIdentifier(id, "identifier list");
+        list.push_back(id);
+    } while (match(TokenType::COMMA));
+
+    expect(TokenType::RPAREN, "Ожидалось ')' после списка");
+    return list;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parseExpression() {
+    auto node = parseAndExpr();
+    while (match(TokenType::KEYWORD, "OR")) {
+        auto right = parseAndExpr();
+        node = std::make_unique<LogicalNode>("OR", std::move(node), std::move(right));
+    }
+    return node;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parseAndExpr() {
+    auto node = parseNotExpr();
+    while (match(TokenType::KEYWORD, "AND")) {
+        auto right = parseNotExpr();
+        node = std::make_unique<LogicalNode>("AND", std::move(node), std::move(right));
+    }
+    return node;
+}
+
+std::unique_ptr<ASTNode> SQLParser::parseNotExpr() {
+    if (match(TokenType::KEYWORD, "NOT")) {
+        auto child = parseNotExpr();
+        return std::make_unique<NotNode>(std::move(child));
+    }
+    return parsePrimary();
+}
+
+std::unique_ptr<ASTNode> SQLParser::parsePrimary() {
+
+    if (match(TokenType::LPAREN)) {
+        auto inner = parseExpression();
+        expect(TokenType::RPAREN, "Ожидалась закрывающая скобка ')'");
+        return inner;
+    }
+
+    const Token lhsTok = consume();
+    const std::string lhsName = lhsTok.value;
+
+    if (match(TokenType::KEYWORD, "BETWEEN")) {
+        const Token lowTok = consume();
+
+        Value low = parseLiteral(lowTok.value);
+
+        expect(TokenType::KEYWORD, "Ожидалось AND в конструкции BETWEEN ... AND ...");
+
+        const Token highTok = consume();
+        Value high = parseLiteral(highTok.value);
+
+        return std::make_unique<BetweenNode>(lhsName, std::move(low), std::move(high));
+    }
+
+    if (match(TokenType::KEYWORD, "LIKE")) {
+        const Token patTok =
+            expect(TokenType::STRING_LITERAL,
+                   "Ожидалась строка-регулярное выражение после LIKE");
+        Value pattern = parseLiteral(patTok.value);
+        return std::make_unique<ComparisonNode>(lhsName, "LIKE", std::move(pattern));
+    }
+
+    const Token opTok =
+        expect(TokenType::OPERATOR, "Ожидался оператор сравнения (==, !=, <, >, <=, >=)");
+
+    const Token rhsTok = consume();
+    Value rhs = parseLiteral(rhsTok.value);
+
+    return std::make_unique<ComparisonNode>(lhsName, opTok.value, std::move(rhs));
+}
+
+Value SQLParser::parseValue() {
+    return parseLiteral(consume().value);
 }
 
 int SQLParser::findColumnIndex(const TableHeader& header, const std::string& colName) const {
-    for (uint32_t c = 0; c < header.column_count; ++c) {
-        if (std::string(header.columns[c].name) == colName) return (int)c;
+    for (uint32_t i = 0; i < header.column_count; ++i) {
+        if (std::string(header.columns[i].name) == colName)
+            return static_cast<int>(i);
     }
     return -1;
 }
 
-bool SQLParser::applyConstraints(Row& row, const TableHeader& header, OutputCallback callback) const {
+bool SQLParser::applyConstraints(Row& row, const TableHeader& header,
+                                 OutputCallback cb) const {
     for (uint32_t i = 0; i < header.column_count; ++i) {
-        if (row[i].is_null) {
-            if (header.columns[i].has_default) {
-                row[i] = parseLiteral(header.columns[i].default_val);
-            } 
-            else if (header.columns[i].is_not_null) {
-                callback("[Error] Constraint Violation: Column '" + std::string(header.columns[i].name) + "' is NOT_NULL.\n");
-                return false;
-            }
+        if (!row[i].is_null) continue;
+
+        if (header.columns[i].has_default) {
+            row[i] = parseLiteral(header.columns[i].default_val);
+        } else if (header.columns[i].is_not_null || header.columns[i].is_indexed) {
+            cb("[Ошибка] Нарушение NOT NULL: колонка '" +
+               std::string(header.columns[i].name) + "' не может быть NULL\n");
+            return false;
         }
     }
     return true;
 }
 
-bool SQLParser::prepareAndValidateRow(Row& outRow, const TableHeader& header, 
-                                     const std::vector<std::string>& targetCols, 
-                                     const std::vector<std::string>& rawValues,
-                                     OutputCallback callback) {
-
-    if (targetCols.empty() && rawValues.size() != header.column_count) {
-        callback("[Error] Column count mismatch. Expected " + std::to_string(header.column_count) + " values.\n");
-        return false;
-    }
-
-    if (!targetCols.empty()) {
-        for (size_t i = 0; i < targetCols.size() && i < rawValues.size(); ++i) {
-            int cIdx = findColumnIndex(header, targetCols[i]);
-            if (cIdx != -1) {
-                outRow[cIdx] = parseLiteral(rawValues[i]);
-            } else {
-                callback("[Error] Column '" + targetCols[i] + "' not found.\n");
+bool SQLParser::prepareAndValidateRow(Row& outRow,
+                                      const TableHeader& header,
+                                      const std::vector<std::string>& targetCols,
+                                      const std::vector<std::string>& rawValues,
+                                      OutputCallback cb) {
+    if (targetCols.empty()) {
+        if (rawValues.size() > header.column_count) {
+            cb("[Ошибка] Передано больше значений (" +
+               std::to_string(rawValues.size()) +
+               "), чем колонок в таблице (" +
+               std::to_string(header.column_count) + ")\n");
+            return false;
+        }
+        for (std::size_t i = 0; i < rawValues.size(); ++i)
+            outRow[i] = parseLiteral(rawValues[i]);
+    } else {
+        if (targetCols.size() != rawValues.size()) {
+            cb("[Ошибка] Количество колонок (" +
+               std::to_string(targetCols.size()) +
+               ") не совпадает с количеством значений (" +
+               std::to_string(rawValues.size()) + ")\n");
+            return false;
+        }
+        for (std::size_t i = 0; i < targetCols.size(); ++i) {
+            const int idx = findColumnIndex(header, targetCols[i]);
+            if (idx == -1) {
+                cb("[Ошибка] Неизвестная колонка '" + targetCols[i] + "'\n");
                 return false;
             }
-        }
-    } else {
-        for (size_t i = 0; i < rawValues.size() && i < header.column_count; ++i) {
-            outRow[i] = parseLiteral(rawValues[i]);
+            outRow[static_cast<std::size_t>(idx)] = parseLiteral(rawValues[i]);
         }
     }
-
-    return applyConstraints(outRow, header, callback);
+    return applyConstraints(outRow, header, cb);
 }

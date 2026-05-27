@@ -2,7 +2,6 @@
 #define PAGER_H
 
 #include <string>
-#include <fstream>
 #include <vector>
 #include <cstdint>
 #include <filesystem>
@@ -13,10 +12,10 @@ namespace fs = std::filesystem;
 class Pager {
 private:
     fs::path filename;
-    std::fstream file_stream;
+    int fd;
     uint32_t page_count;
 
-    std::streampos get_page_offset(uint32_t page_id) const;
+    uint64_t get_page_offset(uint32_t page_id) const;
 
 public:
     explicit Pager(const fs::path& db_path);
@@ -29,6 +28,8 @@ public:
 
     uint32_t get_page_count() const { return page_count; }
     std::string get_filename() const { return filename.string(); }
+
+    int get_fd() const { return fd; }
 
     Pager(const Pager&) = delete;
     Pager& operator=(const Pager&) = delete;
