@@ -251,33 +251,33 @@ public:
 };
 
 
-class RevertStatement : public Statement {
-    std::string table_;
-    std::string timestamp_;
-public:
-    RevertStatement(std::string t, std::string ts) : table_(std::move(t)), timestamp_(std::move(ts)) {}
+// class RevertStatement : public Statement {
+//     std::string table_;
+//     std::string timestamp_;
+// public:
+//     RevertStatement(std::string t, std::string ts) : table_(std::move(t)), timestamp_(std::move(ts)) {}
 
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        auto authRes = requireAccess(fd, table_, "ADMIN", hm);
-        if (!authRes.isOk()) return authRes;
+//     Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+//         auto authRes = requireAccess(fd, table_, "ADMIN", hm);
+//         if (!authRes.isOk()) return authRes;
 
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
+//         auto res = hm.resolveTablePath(table_);
+//         if (!res.isOk()) return res;
 
-        std::string undo_path = res.path + ".undo";
-        std::ifstream undo_file(undo_path, std::ios::binary);
+//         std::string undo_path = res.path + ".undo";
+//         std::ifstream undo_file(undo_path, std::ios::binary);
         
-        if (!undo_file.is_open()) {
-            return Result::Error(StatusCode::NOT_FOUND, "Файл undo-лога для таблицы не найден. Откат невозможен.");
-        }
+//         if (!undo_file.is_open()) {
+//             return Result::Error(StatusCode::NOT_FOUND, "Файл undo-лога для таблицы не найден. Откат невозможен.");
+//         }
         
-        cb("[Temporal] Сканирование файла " + undo_path + "...\n");
-        cb("[Temporal] Поиск транзакций после " + timestamp_ + "...\n");
-        cb("[Temporal] Откат операций завершен успешно. Таблица восстановлена к состоянию на " + timestamp_ + ".\n");
+//         cb("[Temporal] Сканирование файла " + undo_path + "...\n");
+//         cb("[Temporal] Поиск транзакций после " + timestamp_ + "...\n");
+//         cb("[Temporal] Откат операций завершен успешно. Таблица восстановлена к состоянию на " + timestamp_ + ".\n");
         
-        return Result::Success();
-    }
-};
+//         return Result::Success();
+//     }
+// };
 
 class GetTaskStatusStatement : public Statement {
     std::string guid_;

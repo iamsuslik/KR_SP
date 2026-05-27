@@ -12,6 +12,8 @@
 #include <semaphore.h>
 #include "comparators.h"
 
+class DbException;
+
 constexpr int PAGE_SIZE = 4096;
 constexpr const int MAX_COLUMNS = 32;
 constexpr const int MAX_FREE_PAGES = 100;
@@ -78,7 +80,10 @@ enum class StatusCode {
     SYNTAX_ERROR,
     PERMISSION_DENIED,
     INTERNAL_ERROR,
-    TASK_PENDING
+    TASK_PENDING,
+    AUTH_FAILED,
+    SESSION_EXPIRED,
+    INDEX_CORRUPT 
 };
 
 enum class DataType { INT, STR };
@@ -214,5 +219,8 @@ struct WorkerContext {
     char current_db[MAX_NAME_LEN];
     int  client_fd;
 };
+
+class AsyncManager;
+extern AsyncManager* g_async_manager;
 
 #endif // COMMON_H
