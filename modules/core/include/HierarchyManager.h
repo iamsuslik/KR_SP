@@ -19,7 +19,7 @@ public:
     Result useDatabase(const std::string& db_name);
 
     std::string getCurrentDB() const;
-    Result resolveTablePath(const std::string& input_name) const;
+    Result resolveTablePath(const std::string& input_name, int node_id = -1) const;
 };
 
 #endif // HIERARCHY_MANAGER_H

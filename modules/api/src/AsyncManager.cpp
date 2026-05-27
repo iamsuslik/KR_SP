@@ -8,24 +8,55 @@
 
 AsyncManager::AsyncManager() {
 
-    total_size = sizeof(SharedTaskSlot) * MAX_SHARED_TASKS;
+    total_size = sizeof(SharedMemoryLayout);
 
-    shared_array = (SharedTaskSlot*)mmap(NULL, total_size, 
-                                        PROT_READ | PROT_WRITE, 
-                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    layout_ = static_cast<SharedMemoryLayout*>(mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
 
-    if (shared_array == MAP_FAILED) {
+    if (layout_ == MAP_FAILED) {
         perror("[Critical] mmap failed");
         exit(EXIT_FAILURE);
     }
 
-    std::memset(shared_array, 0, total_size);
+    std::memset(layout_, 0, total_size);
+
+    for (int i = 0; i < N_NODES; ++i) {
+        if (sem_init(&layout_->nodes[i].sem_task, /*pshared=*/1, 0) != 0) {
+            perror("[Critical] sem_init(sem_task)");
+            exit(EXIT_FAILURE);
+        }
+        if (sem_init(&layout_->nodes[i].sem_ready, /*pshared=*/1, 1) != 0) {
+            perror("[Critical] sem_init(sem_ready)");
+            exit(EXIT_FAILURE);
+        }
+        layout_->nodes[i].worker_pid = -1;
+        layout_->nodes[i].is_busy    = false;
+        layout_->nodes[i].last_seen  = 0;
+    }
+
+    shared_array = layout_->tasks;
 }
 
 AsyncManager::~AsyncManager() {
-    if (shared_array && shared_array != MAP_FAILED) {
-        munmap(shared_array, total_size);
+    if (layout_ && layout_ != MAP_FAILED) {
+        for (int i = 0; i < N_NODES; ++i) {
+            sem_destroy(&layout_->nodes[i].sem_task);
+            sem_destroy(&layout_->nodes[i].sem_ready);
+        }
+        munmap(layout_, total_size);
     }
+}
+
+int AsyncManager::find_idle_node() const {
+    for (int i = 0; i < N_NODES; ++i) {
+        if (sem_trywait(&layout_->nodes[i].sem_ready) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+SharedMemoryLayout* AsyncManager::getLayout() const {
+    return layout_;
 }
 
 std::string AsyncManager::generate_guid_v4() {
@@ -56,7 +87,6 @@ std::string AsyncManager::register_task() {
     std::string guid = generate_guid_v4();
 
     std::memset(slot, 0, sizeof(SharedTaskSlot));
-    
     std::strncpy(slot->guid, guid.c_str(), 36);
     slot->status = AsyncStatus::PENDING;
     slot->is_used = true;
@@ -66,9 +96,9 @@ std::string AsyncManager::register_task() {
 
 void AsyncManager::update_task(const std::string& guid, AsyncStatus status, StatusCode code, const std::string& result_json) {
     for (int i = 0; i < MAX_SHARED_TASKS; ++i) {
-        if (shared_array[i].is_used && std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0) {
-            
-            shared_array[i].status = status;
+        if (shared_array[i].is_used && std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0)
+        {
+            shared_array[i].status  = status;
             shared_array[i].db_code = code;
 
             std::strncpy(shared_array[i].result_data, result_json.c_str(), SHARED_RESULT_SIZE - 1);
@@ -76,13 +106,7 @@ void AsyncManager::update_task(const std::string& guid, AsyncStatus status, Stat
 
             auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
             char t_buf[26];
-            #ifdef _WIN32
-                ctime_s(t_buf, sizeof(t_buf), &now);
-            #else
-                ctime_r(&now, t_buf);
-            #endif
             std::strncpy(shared_array[i].completion_time, t_buf, 25);
-            
             return;
         }
     }
@@ -90,7 +114,8 @@ void AsyncManager::update_task(const std::string& guid, AsyncStatus status, Stat
 
 AsyncResult AsyncManager::fetch_result(const std::string& guid) {
     for (int i = 0; i < MAX_SHARED_TASKS; ++i) {
-        if (shared_array[i].is_used && std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0) {
+        if (shared_array[i].is_used &&
+            std::strncmp(shared_array[i].guid, guid.c_str(), 36) == 0) {
             return {
                 shared_array[i].status,
                 std::string(shared_array[i].result_data),
@@ -103,38 +128,38 @@ AsyncResult AsyncManager::fetch_result(const std::string& guid) {
 }
 
 void AsyncManager::set_session_db(int fd, const std::string& db_name) {
-    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    auto& sessions = layout_->sessions;
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
-            std::strncpy(layout->sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+        if (sessions[i].is_active && sessions[i].client_fd == fd) {
+            std::strncpy(sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
             return;
         }
     }
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (!layout->sessions[i].is_active) {
-            layout->sessions[i].client_fd = fd;
-            layout->sessions[i].is_active = true;
-            std::strncpy(layout->sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+        if (!sessions[i].is_active) {
+            sessions[i].client_fd = fd;
+            sessions[i].is_active = true;
+            std::strncpy(sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
             return;
         }
     }
 }
 
 std::string AsyncManager::get_session_db(int fd) {
-    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    auto& sessions = layout_->sessions;
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
-            return std::string(layout->sessions[i].current_db);
+        if (sessions[i].is_active && sessions[i].client_fd == fd) {
+            return std::string(sessions[i].current_db);
         }
     }
     return "";
 }
 
 void AsyncManager::close_session(int fd) {
-    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
+    auto& sessions = layout_->sessions;
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
-            layout->sessions[i].is_active = false;
+        if (sessions[i].is_active && sessions[i].client_fd == fd) {
+            sessions[i].is_active = false;
             return;
         }
     }

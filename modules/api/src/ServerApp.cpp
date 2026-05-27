@@ -21,19 +21,118 @@
 #include <atomic>
 #include <sys/wait.h>
 #include <cstring>
+#include <functional>
 
 static constexpr int POLL_TIMEOUT_MS = 1000;
+static constexpr int HEARTBEAT_SEC = 10;
 static constexpr const char* CMD_CHECK = "CHECK ";
-static constexpr size_t CMD_CHECK_LEN   = 6;
+static constexpr size_t CMD_CHECK_LEN = 6;
 
 
-std::atomic<bool> g_keep_running{true};
-
+static std::atomic<bool> g_keep_running{true};
 static void handle_shutdown(int) { g_keep_running = false; }
 
 static bool set_nonblocking(int fd) {
     int fl = fcntl(fd, F_GETFL, 0);
     return fl != -1 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
+}
+
+static int64_t now_sec() {
+    return static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+static int shard_node(const std::string& table_name) {
+    if (table_name.empty()) return 0;
+    return static_cast<int>(std::hash<std::string>{}(table_name) % N_NODES);
+}
+
+static std::string extract_table_name(const std::string& query) {
+    static const std::vector<std::string> kws = {"FROM", "INTO", "UPDATE", "TABLE"};
+
+    std::string upper(query.size(), '\0');
+    for (size_t i = 0; i < query.size(); ++i)
+        upper[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(query[i])));
+
+    for (const auto& kw : kws) {
+        size_t pos = upper.find(kw);
+        if (pos == std::string::npos) continue;
+        pos += kw.size();
+
+        while (pos < query.size() && query[pos] == ' ') ++pos;
+
+        size_t start = pos;
+        while (pos < query.size() &&
+               (std::isalnum(static_cast<unsigned char>(query[pos])) ||
+                query[pos] == '_' || query[pos] == '.')) {
+            ++pos;
+        }
+        if (pos > start) return query.substr(start, pos - start);
+    }
+    return "";
+}
+
+[[noreturn]] static void worker_node_main(int node_id, SharedMemoryLayout* layout, AsyncManager& async) {
+    NodeControl& ctrl = layout->nodes[node_id];
+
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_DFL);
+
+    HierarchyManager hm;
+
+    while (true) {
+        while (sem_wait(&ctrl.sem_task) != 0) {
+            if (errno == EINTR) continue;
+            perror("[Worker] sem_wait failed");
+            ::exit(EXIT_FAILURE);
+        }
+
+        std::string query(ctrl.query_buffer);
+        std::string guid(ctrl.task_guid);
+        std::string db(ctrl.current_db);
+
+        if (!db.empty()) hm.useDatabase(db);
+
+        SQLParser parser;
+        std::string result_buf;
+        auto output_cb = [&](const std::string& s) { result_buf += s; };
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Result res = parser.process(query, hm, -1 /*нет сокета*/, output_cb);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+        async.update_task(guid, AsyncStatus::COMPLETED, res.code, result_buf);
+
+        std::string new_db = hm.getCurrentDB();
+        if (!new_db.empty() && new_db != db) {
+            std::strncpy(ctrl.current_db, new_db.c_str(), MAX_NAME_LEN - 1);
+            ctrl.current_db[MAX_NAME_LEN - 1] = '\0';
+        }
+
+        Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", ms);
+
+        ctrl.last_seen = now_sec();
+        ctrl.is_busy = false;
+
+        sem_post(&ctrl.sem_ready);
+    }
+}
+
+static void spawn_worker(int node_id, SharedMemoryLayout* layout, AsyncManager& async) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("[Master] fork failed");
+        return;
+    }
+    if (pid == 0) {
+        worker_node_main(node_id, layout, async);
+    }
+    layout->nodes[node_id].worker_pid = pid;
+    layout->nodes[node_id].last_seen = now_sec();
+    layout->nodes[node_id].is_busy = false;
+    std::cout << "[Master] Worker " << node_id << " spawned, PID=" << pid << "\n";
 }
 
 int main() {
@@ -42,8 +141,13 @@ int main() {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
 
-    AsyncManager    async;
+    AsyncManager async;
     TelemetryManager telemetry;
+    SharedMemoryLayout* layout = async.getLayout();
+
+    for (int i = 0; i < N_NODES; ++i) {
+        spawn_worker(i, layout, async);
+    }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) { perror("[CRITICAL] socket"); return EXIT_FAILURE; }
@@ -53,9 +157,9 @@ int main() {
     set_nonblocking(server_fd);
 
     sockaddr_in addr{};
-    addr.sin_family= AF_INET;
+    addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port  = htons(NetworkManager::DEFAULT_PORT);
+    addr.sin_port = htons(NetworkManager::DEFAULT_PORT);
 
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         perror("[CRITICAL] bind"); return EXIT_FAILURE;
@@ -65,11 +169,37 @@ int main() {
     std::vector<pollfd> fds;
     fds.push_back({server_fd, POLLIN, 0});
 
-    std::cout << ">>> DBMS MULTI-PROCESS SERVER (mmap Shared Memory) ONLINE <<<" << std::endl;
+    std::cout << ">>> DBMS CLUSTER SERVER (Shared Memory + Semaphores) ONLINE <<<\n";
+    std::cout << "    Nodes: " << N_NODES << ", Heartbeat timeout: " << HEARTBEAT_SEC << "s\n";
 
     while (g_keep_running) {
         int pr = poll(fds.data(), static_cast<nfds_t>(fds.size()), POLL_TIMEOUT_MS);
         if (pr < 0) { if (errno == EINTR) continue; break; }
+
+        {
+            int64_t cur = now_sec();
+            for (int i = 0; i < N_NODES; ++i) {
+                NodeControl& ctrl = layout->nodes[i];
+
+                bool alive = (ctrl.worker_pid > 0) && (kill(ctrl.worker_pid, 0) == 0);
+
+                if (!alive || (ctrl.is_busy && (cur - ctrl.last_seen) > HEARTBEAT_SEC)) {
+                    if (ctrl.worker_pid > 0) {
+                        std::cerr << "[Heartbeat] Worker " << i
+                                  << " (PID=" << ctrl.worker_pid
+                                  << ") unresponsive. Restarting...\n";
+                        kill(ctrl.worker_pid, SIGKILL);
+                        waitpid(ctrl.worker_pid, nullptr, WNOHANG);
+                    }
+                    sem_destroy(&ctrl.sem_task);
+                    sem_destroy(&ctrl.sem_ready);
+                    sem_init(&ctrl.sem_task,  1, 0);
+                    sem_init(&ctrl.sem_ready, 1, 1);
+
+                    spawn_worker(i, layout, async);
+                }
+            }
+        }
 
         for (size_t i = 0; i < fds.size(); ++i) {
             if (!(fds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
@@ -85,7 +215,7 @@ int main() {
                 continue;
             }
 
-            int  cfd   = fds[i].fd;
+            int cfd = fds[i].fd;
             auto query = NetworkManager::receiveString(cfd);
 
             if (query.empty()) {
@@ -101,10 +231,11 @@ int main() {
                 if (!guid.empty() && guid.back() == ';') guid.pop_back();
 
                 AsyncResult res = async.fetch_result(guid);
-                std::string resp = (res.status == AsyncStatus::PENDING ||
-                                    res.status == AsyncStatus::PROCESSING)
-                                   ? "Processing..."
-                                   : res.data;
+                std::string resp =
+                    (res.status == AsyncStatus::PENDING ||
+                     res.status == AsyncStatus::PROCESSING)
+                    ? "Processing..."
+                    : res.data;
                 NetworkManager::sendString(cfd, resp);
                 close(cfd);
                 fds.erase(fds.begin() + static_cast<long>(i));
@@ -112,75 +243,35 @@ int main() {
                 continue;
             }
 
-            std::string guid       = async.register_task();
+            std::string guid = async.register_task();
             std::string current_db = async.get_session_db(cfd);
 
-            int pipefd[2];
-            if (pipe(pipefd) == -1) {
-                perror("[Error] pipe");
-                NetworkManager::sendString(cfd, "ASYNC_ID: " + guid);
-                close(cfd);
-                fds.erase(fds.begin() + static_cast<long>(i));
-                --i;
-                continue;
+            std::string table_name = extract_table_name(query);
+            int target_node = shard_node(table_name);
+
+            NodeControl& ctrl = layout->nodes[target_node];
+
+            while (sem_wait(&ctrl.sem_ready) != 0) {
+                if (errno == EINTR) continue;
+                break;
             }
+
+            std::strncpy(ctrl.query_buffer, query.c_str(), NODE_QUERY_BUFFER - 1);
+            ctrl.query_buffer[NODE_QUERY_BUFFER - 1] = '\0';
+
+            std::strncpy(ctrl.task_guid, guid.c_str(), 36);
+            ctrl.task_guid[36] = '\0';
+
+            std::strncpy(ctrl.current_db, current_db.c_str(), MAX_NAME_LEN - 1);
+            ctrl.current_db[MAX_NAME_LEN - 1] = '\0';
+
+            ctrl.is_busy = true;
+            ctrl.last_seen = now_sec();
+
+            sem_post(&ctrl.sem_task);
 
             NetworkManager::sendString(cfd, "ASYNC_ID: " + guid);
-
-            pid_t pid = fork();
-            if (pid < 0) {
-                perror("[Error] fork");
-                close(pipefd[0]); close(pipefd[1]);
-            } else if (pid == 0) {
-                close(pipefd[1]);
-
-                WorkerContext ctx{};
-                ssize_t r = ::read(pipefd[0], &ctx, sizeof(ctx));
-                close(pipefd[0]);
-                if (r <= 0) ::exit(EXIT_FAILURE);
-
-                for (auto& pfd : fds) close(pfd.fd);
-
-                HierarchyManager hm;
-                if (ctx.current_db[0] != '\0')
-                    hm.useDatabase(std::string(ctx.current_db));
-
-                SQLParser parser;
-                std::string result_buf;
-                auto output_cb = [&](const std::string& s) { result_buf += s; };
-
-                auto t0 = std::chrono::high_resolution_clock::now();
-                Result res = parser.process(std::string(ctx.query), hm, ctx.client_fd, output_cb);
-                auto t1 = std::chrono::high_resolution_clock::now();
-                long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
-
-                std::string new_db = hm.getCurrentDB();
-                if (!new_db.empty() && new_db != std::string(ctx.current_db)) {
-                    async.set_session_db(ctx.client_fd, new_db);
-                }
-
-                async.update_task(std::string(ctx.guid),
-                                  AsyncStatus::COMPLETED,
-                                  res.code,
-                                  result_buf);
-
-                Logger::log(std::string(ctx.query),
-                            res.isOk() ? "SUCCESS" : "ERROR", ms);
-
-                ::exit(EXIT_SUCCESS);
-            } else {
-                close(pipefd[0]);
-
-                WorkerContext ctx{};
-                std::strncpy(ctx.guid, guid.c_str(), 36);
-                std::strncpy(ctx.query, query.c_str(), sizeof(ctx.query) - 1);
-                std::strncpy(ctx.current_db, current_db.c_str(), MAX_NAME_LEN - 1);
-                ctx.client_fd = cfd;
-                ::write(pipefd[1], &ctx, sizeof(ctx));
-                close(pipefd[1]);
-
-                telemetry.recordQuery(0, false);
-            }
+            telemetry.recordQuery(0, false);
 
             close(cfd);
             fds.erase(fds.begin() + static_cast<long>(i));
@@ -188,7 +279,13 @@ int main() {
         }
     }
 
+    for (int i = 0; i < N_NODES; ++i) {
+        if (layout->nodes[i].worker_pid > 0) {
+            kill(layout->nodes[i].worker_pid, SIGTERM);
+        }
+    }
+
     for (auto& pfd : fds) close(pfd.fd);
-    std::cout << "[Server] Shutdown complete.\n";
+    std::cout << "[Master] Shutdown complete.\n";
     return EXIT_SUCCESS;
 }

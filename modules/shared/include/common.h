@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <regex>
 #include <map>
+#include <semaphore.h>
 #include "comparators.h"
 
 constexpr int PAGE_SIZE = 4096;
@@ -17,6 +18,21 @@ constexpr const int MAX_FREE_PAGES = 100;
 constexpr const int MAX_NAME_LEN = 32;
 constexpr const int TYPE_STR_SIZE = 256; 
 constexpr const int TYPE_INT_SIZE = 4;
+
+constexpr int N_NODES = 4;
+
+constexpr int NODE_QUERY_BUFFER = 65536;
+
+struct NodeControl {
+    pid_t worker_pid;
+    sem_t sem_task;
+    sem_t sem_ready;
+    char query_buffer[NODE_QUERY_BUFFER];
+    char task_guid[37];
+    char current_db[MAX_NAME_LEN];
+    int64_t last_seen;
+    bool is_busy;
+};
 
 enum class TokenType {
     IDENTIFIER, 
@@ -60,7 +76,7 @@ enum class StatusCode {
     NOT_NULL_VIOLATION,
     INVALID_VALUE,
     SYNTAX_ERROR,
-    PERMISSION_DENIED, // Добавлено для RBAC
+    PERMISSION_DENIED,
     INTERNAL_ERROR,
     TASK_PENDING
 };
@@ -171,6 +187,7 @@ struct SessionSlot {
 struct SharedMemoryLayout {
     SharedTaskSlot tasks[MAX_SHARED_TASKS];
     SessionSlot sessions[MAX_SESSIONS];
+    NodeControl nodes[N_NODES];
 };
 #pragma pack(pop)
 
@@ -182,7 +199,9 @@ struct [[nodiscard]] Result {
 
     bool isOk() const { return code == StatusCode::OK; }
     void throw_if_error() const {
-        if (code != StatusCode::OK) throw DbException(code, details);
+        if (code != StatusCode::OK) {
+            throw DbException(code, details);
+        }
     }
     static Result Success(RecordID r = {0,0}, std::string d = "") { return {StatusCode::OK, d, r}; }
     static Result Error(StatusCode c, std::string d = "") { return {c, std::move(d)}; }
@@ -190,9 +209,9 @@ struct [[nodiscard]] Result {
 
 struct WorkerContext {
     char guid[37];
-    char query[65536];
+    char query[NODE_QUERY_BUFFER];
     char current_db[MAX_NAME_LEN];
-    int client_fd;
+    int  client_fd;
 };
 
 #endif // COMMON_H
