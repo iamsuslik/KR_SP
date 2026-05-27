@@ -20,13 +20,20 @@ public:
     void update_task(const std::string& guid, AsyncStatus status, StatusCode code, const std::string& result_json);
     AsyncResult fetch_result(const std::string& guid);
 
-    void set_session_db(int fd, const std::string& db_name);
-    std::string get_session_db(int fd);
+
     void close_session(int fd);
 
     int find_idle_node() const;
 
     SharedMemoryLayout* getLayout() const;
+// Найти в AsyncManager.h секцию сессий и вставить ПОД close_session:
+    void set_session_db(int fd, const std::string& db_name);
+    std::string get_session_db(int fd);
+
+
+    // === ВСТАВИТЬ СЮДА ===
+    void set_session_user(int fd, const std::string& username);
+    std::string get_session_user(int fd);
 
 private:
     SharedMemoryLayout* layout_ = nullptr;

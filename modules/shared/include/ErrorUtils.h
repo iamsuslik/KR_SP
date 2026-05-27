@@ -3,6 +3,7 @@
 
 #include <string>
 #include "common.h"
+#include "DbException.h"
 
 class ErrorUtils {
 public:

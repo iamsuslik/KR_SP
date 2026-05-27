@@ -7,11 +7,11 @@
 
 class HierarchyManager {
 private:
-    const std::string ROOT_DIR = "data";
     std::string current_db;
     mutable std::shared_mutex db_mtx;
 
 public:
+    static inline const std::string ROOT_DIR = "data"; 
     HierarchyManager();
 
     Result createDatabase(const std::string& db_name);

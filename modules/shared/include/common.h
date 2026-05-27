@@ -10,12 +10,11 @@
 #include <regex>
 #include <map>
 #include <semaphore.h>
-#include "comparators.h"
 
 class DbException;
 
 constexpr int PAGE_SIZE = 4096;
-constexpr const int MAX_COLUMNS = 32;
+constexpr const int MAX_COLUMNS = 8;
 constexpr const int MAX_FREE_PAGES = 100;
 constexpr const int MAX_NAME_LEN = 32;
 constexpr const int TYPE_STR_SIZE = 256; 
@@ -24,6 +23,8 @@ constexpr const int TYPE_INT_SIZE = 4;
 constexpr int N_NODES = 4;
 
 constexpr int NODE_QUERY_BUFFER = 65536;
+
+#include "comparators.h"
 
 struct NodeControl {
     pid_t worker_pid;
@@ -204,11 +205,7 @@ struct [[nodiscard]] Result {
     std::string path = "";
 
     bool isOk() const { return code == StatusCode::OK; }
-    void throw_if_error() const {
-        if (code != StatusCode::OK) {
-            throw DbException(code, details);
-        }
-    }
+    void throw_if_error() const; 
     static Result Success(RecordID r = {0,0}, std::string d = "") { return {StatusCode::OK, d, r}; }
     static Result Error(StatusCode c, std::string d = "") { return {c, std::move(d)}; }
 };

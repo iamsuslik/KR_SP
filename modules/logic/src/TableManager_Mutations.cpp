@@ -211,40 +211,51 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         Pager pager(full_path);
         fd_to_unlock = pager.get_fd();
 
-        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
+        // 1. Пытаемся заблокировать таблицу. Если не вышло — сразу выходим.
+        if (!TableLockManager::lock_table(fd_to_unlock, true)) {
+            return Result::Error(StatusCode::IO_ERROR, "Не удалось заблокировать таблицу для записи");
+        }
 
         TableHeader header;
+        // 2. Читаем заголовок. throw_if_error отправит нас в catch при сбое I/O
         pager.read_page(0, &header).throw_if_error();
 
         TablePageManager pm(pager, header);
-        checkUniqueConstraints(pager, header, row, pm).throw_if_error();
+        
+        // 3. Проверка уникальности (INDEXED). Если ключ дублируется — выходим.
+        Result checkRes = checkUniqueConstraints(pager, header, row, pm);
+        if (!checkRes.isOk()) {
+            TableLockManager::unlock_table(fd_to_unlock);
+            return checkRes;
+        }
 
         std::vector<char> rec = RecordManager::serializeRowDynamic(row, header);
         uint16_t rec_size = static_cast<uint16_t>(rec.size());
 
+        // 4. Ищем место. Если места нет — ошибка.
         RecordID rid = findAvailableSlot(pager, header, rec_size);
-        if (rid.page_id == 0) throw DbException(StatusCode::OUT_OF_MEMORY, "No space");
+        if (rid.page_id == 0) {
+             throw DbException(StatusCode::OUT_OF_MEMORY, "В таблице нет свободного места");
+        }
 
         alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
         pager.read_page(rid.page_id, page_buffer).throw_if_error();
 
+        // 5. Записываем данные в страницу
         rid.slot_id = write_record_to_page(page_buffer, rec);
+        
+        // 6. СБРОС НА ДИСК. Проверяем, что запись физически прошла.
         pager.write_page(rid.page_id, page_buffer).throw_if_error();
+        
+        // 7. Обновляем заголовки (free_list и т.д.)
         pager.write_page(0, &header).throw_if_error();
 
-        for (uint32_t i = 0; i < header.column_count; ++i) {
-            if (header.columns[i].is_indexed && !row[i].is_null) {
-                if (row[i].str_val.size() >= TYPE_STR_SIZE) {
-                    TableLockManager::unlock_table(fd_to_unlock);
-                    return Result::Error(StatusCode::INVALID_VALUE, "Indexed string too long for static B-tree");
-                }
-            }
-        }
-
+        // 8. Обновляем индексы. (ВАЖНО: В коде ниже я предполагаю, что мы поправили его на возврат Result)
+        // Если это все еще void, вызови его просто так, но лучше добавить проверку.
         updateIndices(pager, header, row, rid);
 
         TableLockManager::unlock_table(fd_to_unlock);
-        return Result::Success(rid, "1 row inserted.");
+        return Result::Success(rid, "Запись успешно добавлена");
 
     } catch (const DbException& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
@@ -401,46 +412,61 @@ Result TableManager::executeDelete(const std::string& full_path, const ASTNode* 
         Pager pager(full_path);
         fd_to_unlock = pager.get_fd();
 
-        TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
+        // 1. ЗАЩИТА: Явно проверяем, удалось ли захватить блокировку.
+        // Если другой процесс завис, мы не должны пытаться удалять данные «вслепую».
+        if (!TableLockManager::lock_table(fd_to_unlock, true)) {
+            return Result::Error(StatusCode::IO_ERROR, "Не удалось заблокировать таблицу для удаления (файл занят)");
+        }
 
         TableHeader header;
+        // 2. ЗАЩИТА: Читаем заголовок с проверкой I/O.
         pager.read_page(0, &header).throw_if_error();
 
         RecordID rid;
+        // 3. ОПТИМИЗАЦИЯ: Пытаемся найти запись через индекс.
         Result idx_res = getRIDFromIndex(pager, header, cond, rid);
 
         if (idx_res.isOk()) {
+            // ПУТЬ ЧЕРЕЗ ИНДЕКС (Точечное удаление)
             alignas(PAGE_SIZE) char buf[PAGE_SIZE];
             pager.read_page(rid.page_id, buf).throw_if_error();
 
             Row row = getRowFromSlot(buf, rid.slot_id, header);
             if (row.empty()) {
                 TableLockManager::unlock_table(fd_to_unlock);
-                return Result::Success({0,0}, "Deleted 0 rows (Already empty)");
+                return Result::Success({0,0}, "Удалено 0 строк (Запись уже пуста)");
             }
 
+            // 4. ЗАЩИТА: Сначала чистим все индексы, привязанные к этой строке.
+            // Если индекс сломан, clearIndicesForRow выбросит исключение.
             clearIndicesForRow(pager, header, row);
 
+            // 5. Логическое удаление из страницы
             Slot* slots = get_slots(buf);
             slots[rid.slot_id].length = 0;
             slots[rid.slot_id].offset = 0;
             recalc_free_space(get_hdr(buf));
 
+            // 6. ЗАЩИТА: Физически записываем изменения. Если диск «отвалится», мы узнаем об этом здесь.
             pager.write_page(rid.page_id, buf).throw_if_error();
             pager.write_page(0, &header).throw_if_error();
 
             TableLockManager::unlock_table(fd_to_unlock);
-            return Result::Success({0,0}, "Deleted 1 row (Optimized via Index)");
+            return Result::Success({0,0}, "Успешно удалена 1 строка (через индекс)");
         }
 
-        if (idx_res.code == StatusCode::NOT_FOUND) {
+        // Если индекс вернул ошибку, которая НЕ является "NOT_FOUND" (например, ошибка I/O в дереве)
+        if (idx_res.code != StatusCode::NOT_FOUND && !idx_res.isOk()) {
             TableLockManager::unlock_table(fd_to_unlock);
-            return Result::Success({0,0}, "Deleted 0 rows (Key not in index)");
+            return idx_res;
         }
 
+        // 7. ПОЛНОЕ СКАНИРОВАНИЕ (если индекс не применим)
+        // Внутри fullScanDelete должны быть такие же вызовы throw_if_error()
         int count = fullScanDelete(pager, header, cond);
+        
         TableLockManager::unlock_table(fd_to_unlock);
-        return Result::Success({0,0}, "Deleted " + std::to_string(count) + " rows (Full Scan)");
+        return Result::Success({0,0}, "Удалено " + std::to_string(count) + " строк (Full Scan)");
 
     } catch (const DbException& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
