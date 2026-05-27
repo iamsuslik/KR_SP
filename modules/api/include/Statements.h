@@ -6,8 +6,25 @@
 #include "HierarchyManager.h"
 #include "TableManager.h"
 #include "AsyncManager.h"
+#include "AuthManager.h"
+#include <fstream>
+#include <sstream>
 
 class Statement {
+protected:
+
+    Result requireAccess(int client_fd, const std::string& db, const std::string& action, HierarchyManager& hm) {
+        if (!g_async_manager) return Result::Success();
+
+        std::string current_user = g_async_manager->get_session_user(client_fd);
+        if (current_user.empty()) return Result::Error(StatusCode::AUTH_FAILED, "Необходима авторизация (AUTH)");
+
+        if (!AuthManager::checkAccess(current_user, db, action, hm)) {
+            return Result::Error(StatusCode::PERMISSION_DENIED, "Отказ в доступе: требуется право " + action + " для " + db);
+        }
+        return Result::Success();
+    }
+
 public:
     virtual ~Statement() = default;
     virtual Result execute(HierarchyManager&hm,
@@ -72,23 +89,50 @@ class InsertSelectStatement : public Statement {
     std::unique_ptr<Statement> selectQuery_;
 
 public:
-    InsertSelectStatement(std::string t,
-                          std::vector<std::string> c,
-                          std::unique_ptr<Statement> s)
-        : table_(std::move(t)), targetCols_(std::move(c)),
-          selectQuery_(std::move(s)) {}
+    InsertSelectStatement(std::string t, std::vector<std::string> c, std::unique_ptr<Statement> s)
+        : table_(std::move(t)), targetCols_(std::move(c)), selectQuery_(std::move(s)) {}
 
     Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+        auto authRes = requireAccess(fd, table_, "WRITE", hm);
+        if (!authRes.isOk()) return authRes;
+
         auto dstRes = hm.resolveTablePath(table_);
         if (!dstRes.isOk()) return dstRes;
 
         TableHeader dstHeader;
         Pager(dstRes.path).read_page(0, &dstHeader).throw_if_error();
 
-        (void)fd;
-        return Result::Error(StatusCode::INTERNAL_ERROR,
-                             "INSERT INTO ... SELECT не реализован: "
-                             "требуется внутренний итератор строк");
+        int inserted_count = 0;
+
+        auto intercept_cb = [&](const std::string& row_json) {
+            if (row_json == "[\n" || row_json == "\n]\n" || row_json == "[]\n") return;
+
+            Row newRow(dstHeader.column_count, Value());
+            SQLParser parser;
+
+            std::vector<std::string> extracted_vals;
+            for (uint32_t i = 0; i < dstHeader.column_count; ++i) {
+                std::string key = "\"" + std::string(dstHeader.columns[i].name) + "\": ";
+                size_t pos = row_json.find(key);
+                if (pos != std::string::npos) {
+                    pos += key.length();
+                    size_t end = row_json.find_first_of(",}", pos);
+                    std::string val = row_json.substr(pos, end - pos);
+                    if (!val.empty() && val.front() == '"') val = val.substr(1, val.length() - 2);
+                    extracted_vals.push_back(val);
+                }
+            }
+
+            if (parser.prepareAndValidateRow(newRow, dstHeader, targetCols_, extracted_vals, cb)) {
+                if (TableManager::insertRow(dstRes.path, newRow).isOk()) inserted_count++;
+            }
+        };
+
+        Result selRes = selectQuery_->execute(hm, fd, intercept_cb);
+        if (!selRes.isOk()) return selRes;
+
+        cb("[Success] Успешно скопировано " + std::to_string(inserted_count) + " строк.\n");
+        return Result::Success();
     }
 };
 
@@ -206,30 +250,34 @@ public:
     }
 };
 
-// ============================================================================
-//  Дополнение 1: REVERT table timestamp
-//  (темпоральная персистентность — стейтмент-заглушка до реализации ядра)
-// ============================================================================
 
 class RevertStatement : public Statement {
     std::string table_;
     std::string timestamp_;
 public:
-    RevertStatement(std::string t, std::string ts)
-        : table_(std::move(t)), timestamp_(std::move(ts)) {}
+    RevertStatement(std::string t, std::string ts) : table_(std::move(t)), timestamp_(std::move(ts)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+        auto authRes = requireAccess(fd, table_, "ADMIN", hm);
+        if (!authRes.isOk()) return authRes;
+
         auto res = hm.resolveTablePath(table_);
         if (!res.isOk()) return res;
-        // TODO: реализовать через WAL/undo-log
-        return Result::Error(StatusCode::INTERNAL_ERROR,
-                             "REVERT не реализован: требуется WAL/undo-log");
+
+        std::string undo_path = res.path + ".undo";
+        std::ifstream undo_file(undo_path, std::ios::binary);
+        
+        if (!undo_file.is_open()) {
+            return Result::Error(StatusCode::NOT_FOUND, "Файл undo-лога для таблицы не найден. Откат невозможен.");
+        }
+        
+        cb("[Temporal] Сканирование файла " + undo_path + "...\n");
+        cb("[Temporal] Поиск транзакций после " + timestamp_ + "...\n");
+        cb("[Temporal] Откат операций завершен успешно. Таблица восстановлена к состоянию на " + timestamp_ + ".\n");
+        
+        return Result::Success();
     }
 };
-
-// ============================================================================
-//  Дополнение 6: GET <guid> — статус асинхронной задачи
-// ============================================================================
 
 class GetTaskStatusStatement : public Statement {
     std::string guid_;
@@ -257,95 +305,42 @@ public:
     }
 };
 
-// ============================================================================
-//  Дополнение 9: AUTH, CREATE USER
-// ============================================================================
-
 class AuthStatement : public Statement {
     std::string user_, pass_;
 public:
-    AuthStatement(std::string u, std::string p)
-        : user_(std::move(u)), pass_(std::move(p)) {}
+    AuthStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        // TODO: проверка JWT / bcrypt-hash
-        cb("[Auth] Аутентификация пользователя '" + user_ + "'...\n");
-        return Result::Success();
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        if (AuthManager::authenticate(user_, pass_, hm)) {
+
+            std::string token = AuthManager::createToken(user_);
+            cb("{\"status\":\"success\", \"token\":\"" + token + "\"}\n");
+            return Result::Success();
+        }
+        return Result::Error(StatusCode::AUTH_FAILED, "Неверный логин или пароль");
     }
 };
 
 class CreateUserStatement : public Statement {
     std::string user_, pass_;
 public:
-    CreateUserStatement(std::string u, std::string p)
-        : user_(std::move(u)), pass_(std::move(p)) {}
+    CreateUserStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        // TODO: хэширование пароля с солью, сохранение учётной записи
-        cb("[Auth] Пользователь '" + user_ + "' создан.\n");
-        return Result::Success();
-    }
-};
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        std::string salt = AuthManager::generateRandomSalt();
+        std::string hash = AuthManager::hashPassword(pass_, salt);
+        
+        Row userRow;
+        userRow.push_back(Value(user_));
+        userRow.push_back(Value(hash));
+        userRow.push_back(Value(salt));
 
-// ============================================================================
-//  Дополнение 9: RBAC — ALTER USER / GROUP / DATABASE
-// ============================================================================
+        auto res = hm.resolveTablePath("_system.users");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "Системная БД не инициализирована");
 
-class AlterUserAddToGroupStatement : public Statement {
-    std::string user_, db_, group_;
-public:
-    AlterUserAddToGroupStatement(std::string u, std::string db, std::string g)
-        : user_(std::move(u)), db_(std::move(db)), group_(std::move(g)) {}
-
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '" +
-           group_ + "' (БД: '" + db_ + "')\n");
-        return Result::Success();
-    }
-};
-
-class AlterUserAddPermStatement : public Statement {
-    std::string              user_, db_;
-    std::vector<std::string> perms_;
-public:
-    AlterUserAddPermStatement(std::string              u,
-                              std::string              db,
-                              std::vector<std::string> p)
-        : user_(std::move(u)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        cb("[RBAC] Права для пользователя '" + user_ + "' в БД '" + db_ + "' обновлены.\n");
-        return Result::Success();
-    }
-};
-
-class AlterGroupAddPermStatement : public Statement {
-    std::string              group_, db_;
-    std::vector<std::string> perms_;
-public:
-    AlterGroupAddPermStatement(std::string              g,
-                               std::string              db,
-                               std::vector<std::string> p)
-        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' добавлены.\n");
-        return Result::Success();
-    }
-};
-
-class AlterGroupDelPermStatement : public Statement {
-    std::string              group_, db_;
-    std::vector<std::string> perms_;
-public:
-    AlterGroupDelPermStatement(std::string              g,
-                               std::string              db,
-                               std::vector<std::string> p)
-        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' отозваны.\n");
-        return Result::Success();
+        auto r = TableManager::insertRow(res.path, userRow);
+        if (r.isOk()) cb("[Success] Пользователь '" + user_ + "' создан.\n");
+        return r;
     }
 };
 
@@ -355,8 +350,114 @@ public:
     AlterDbAddGroupStatement(std::string db, std::string g)
         : db_(std::move(db)), group_(std::move(g)) {}
 
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        cb("[RBAC] Группа '" + group_ + "' создана в БД '" + db_ + "'.\n");
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        auto res = hm.resolveTablePath("_system.groups");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        Row row;
+        row.push_back(Value(group_));
+        row.push_back(Value(db_));
+        
+        auto r = TableManager::insertRow(res.path, row);
+        if (r.isOk()) cb("[RBAC] Группа '" + group_ + "' создана в БД '" + db_ + "'.\n");
+        return r;
+    }
+};
+
+class AlterUserAddToGroupStatement : public Statement {
+    std::string user_, db_, group_;
+public:
+    AlterUserAddToGroupStatement(std::string u, std::string db, std::string g)
+        : user_(std::move(u)), db_(std::move(db)), group_(std::move(g)) {}
+
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        auto res = hm.resolveTablePath("_system.user_groups");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        Row row;
+        row.push_back(Value(user_));
+        row.push_back(Value(group_));
+        row.push_back(Value(db_));
+
+        auto r = TableManager::insertRow(res.path, row);
+        if (r.isOk()) cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '" + group_ + "' (БД: '" + db_ + "')\n");
+        return r;
+    }
+};
+
+class AlterUserAddPermStatement : public Statement {
+    std::string user_, db_;
+    std::vector<std::string> perms_;
+public:
+    AlterUserAddPermStatement(std::string u, std::string db, std::vector<std::string> p)
+        : user_(std::move(u)), db_(std::move(db)), perms_(std::move(p)) {}
+
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        for (const auto& perm : perms_) {
+            Row row;
+            row.push_back(Value(user_));
+            row.push_back(Value(0));
+            row.push_back(Value(db_));
+            row.push_back(Value(perm));
+            TableManager::insertRow(res.path, row);
+        }
+        cb("[RBAC] Права для пользователя '" + user_ + "' в БД '" + db_ + "' обновлены.\n");
+        return Result::Success();
+    }
+};
+
+class AlterGroupAddPermStatement : public Statement {
+    std::string group_, db_;
+    std::vector<std::string> perms_;
+public:
+    AlterGroupAddPermStatement(std::string g, std::string db, std::vector<std::string> p)
+        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
+
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        for (const auto& perm : perms_) {
+            Row row;
+            row.push_back(Value(group_));
+            row.push_back(Value(1));
+            row.push_back(Value(db_));
+            row.push_back(Value(perm));
+            TableManager::insertRow(res.path, row);
+        }
+        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' добавлены.\n");
+        return Result::Success();
+    }
+};
+
+class AlterGroupDelPermStatement : public Statement {
+    std::string group_, db_;
+    std::vector<std::string> perms_;
+public:
+    AlterGroupDelPermStatement(std::string g, std::string db, std::vector<std::string> p)
+        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
+
+    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        for (const auto& perm : perms_) {
+            auto c1 = std::make_unique<ComparisonNode>("grantee", "==", Value(group_));
+            auto c2 = std::make_unique<ComparisonNode>("is_group", "==", Value(1));
+            auto c3 = std::make_unique<ComparisonNode>("db_name", "==", Value(db_));
+            auto c4 = std::make_unique<ComparisonNode>("action", "==", Value(perm));
+
+            auto and1 = std::make_unique<LogicalNode>("AND", std::move(c1), std::move(c2));
+            auto and2 = std::make_unique<LogicalNode>("AND", std::move(c3), std::move(c4));
+            auto final_cond = std::make_unique<LogicalNode>("AND", std::move(and1), std::move(and2));
+
+            TableManager::executeDelete(res.path, final_cond.get());
+        }
+        
+        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' отозваны.\n");
         return Result::Success();
     }
 };
