@@ -181,6 +181,7 @@ struct SharedTaskSlot {
 struct SessionSlot {
     int client_fd;
     char current_db[MAX_NAME_LEN];
+    char current_user[MAX_NAME_LEN];
     bool is_active;
 };
 
