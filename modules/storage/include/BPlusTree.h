@@ -299,16 +299,13 @@ void BP_tree<tkey, t, compare>::range_scan(const tkey& lo, const tkey& hi, std::
 
             if (compare{}(k, lo)) continue;
 
-            if (!compare{}(k, hi) && !equal(k, lo) && (compare{}(hi, k) || equal(k, hi))) {
-                if (!compare{}(k, hi)) return;
-            }
+            if (!compare{}(k, hi)) return; 
 
             callback(leaf->_data[i].second);
         }
 
         if (leaf->_next == 0) break;
-        uint32_t next_id = leaf->_next;
-        _pager.read_page(next_id, leaf_buf).throw_if_error();
+        _pager.read_page(leaf->_next, leaf_buf).throw_if_error();
     }
 }
 

@@ -289,7 +289,7 @@ void TableManager::applyAssignments(
             if (col.is_indexed) {
                 if (col.type == static_cast<uint8_t>(DataType::INT)) {
                     BP_tree<int> index(pager, header.root_page_ids[colIdx], pm);
-                    index.erase(row[colIdx].int_val);
+                    index.erase(row[colIdx].int_val).throw_if_error();
                     row[colIdx] = newValue;
                     index.insert(newValue.int_val, rid);
                 } else {
@@ -299,9 +299,9 @@ void TableManager::applyAssignments(
                     std::memset(newK.data, 0, TYPE_STR_SIZE);
                     std::strncpy(oldK.data, row[colIdx].str_val.c_str(), TYPE_STR_SIZE - 1);
                     std::strncpy(newK.data, newValue.str_val.c_str(), TYPE_STR_SIZE - 1);
-                    index.erase(oldK);
+                    index.erase(oldK).throw_if_error();
                     row[colIdx] = newValue;
-                    index.insert(newK, rid);
+                    index.insert(newK, rid).throw_if_error();
                 }
                 header_changed = true;
             } else {

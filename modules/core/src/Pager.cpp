@@ -84,7 +84,9 @@ Result Pager::write_page(uint32_t page_id, const void* buffer) {
 uint32_t Pager::allocate_page() {
     std::vector<char> buffer(PAGE_SIZE, 0); 
 
-    off_t offset = lseek(fd, 0, SEEK_END);
+    if (::lseek(fd, 0, SEEK_END) == -1) {
+        throw std::runtime_error("Pager Fatal: lseek failed.");
+    }
 
     ssize_t bytes_written = ::write(fd, buffer.data(), PAGE_SIZE);
     

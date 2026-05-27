@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sys/mman.h>
 
+AsyncManager* g_async_manager = nullptr; 
+
 AsyncManager::AsyncManager() {
 
     total_size = sizeof(SharedMemoryLayout);
@@ -166,7 +168,6 @@ void AsyncManager::close_session(int fd) {
     }
 }
 
-// Добавить в самый конец файла AsyncManager.cpp:
 
 void AsyncManager::set_session_user(int fd, const std::string& username) {
     // Приводим общую память к нашей структуре разметки

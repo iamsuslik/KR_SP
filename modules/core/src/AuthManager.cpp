@@ -110,7 +110,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
 
     if (hm.resolveTablePath("_system.users", SYS_FD).isOk()) return;
 
-    hm.createDatabase("_system");
+    hm.createDatabase("_system").throw_if_error(); 
 
     {
         std::vector<ColumnDef> c = {
@@ -120,7 +120,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
         };
         c[0].is_indexed = true;
         auto p = hm.resolveTablePath("_system.users", SYS_FD);
-        TableManager::createTable(p.path, TableSchema("users", c));
+        TableManager::createTable(p.path, TableSchema("users", c)).throw_if_error();
     }
 
     {
@@ -130,7 +130,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
         };
         c[0].is_indexed = true;
         auto p = hm.resolveTablePath("_system.groups", SYS_FD);
-        TableManager::createTable(p.path, TableSchema("groups", c));
+        TableManager::createTable(p.path, TableSchema("groups", c)).throw_if_error();
     }
 
     {
@@ -141,7 +141,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
         };
         c[0].is_indexed = true;
         auto p = hm.resolveTablePath("_system.user_groups", SYS_FD);
-        TableManager::createTable(p.path, TableSchema("user_groups", c));
+        TableManager::createTable(p.path, TableSchema("user_groups", c)).throw_if_error();
     }
     {
         std::vector<ColumnDef> c = {
@@ -152,7 +152,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
         };
         c[0].is_indexed = true;
         auto p = hm.resolveTablePath("_system.permissions", SYS_FD);
-        TableManager::createTable(p.path, TableSchema("permissions", c));
+        TableManager::createTable(p.path, TableSchema("permissions", c)).throw_if_error();
     }
 
     std::string salt = generateRandomSalt();
@@ -161,7 +161,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
     admin_row.push_back(Value(hashPassword("admin", salt)));
     admin_row.push_back(Value(salt));
     auto up = hm.resolveTablePath("_system.users", SYS_FD);
-    TableManager::insertRow(up.path, admin_row);
+    TableManager::insertRow(up.path, admin_row).throw_if_error();
 }
 
 bool AuthManager::authenticate(const std::string& username,
@@ -180,8 +180,9 @@ bool AuthManager::authenticate(const std::string& username,
             db_salt = extractJsonValue(row, "salt");
         }
     };
-    TableManager::executeSelect(path_res.path, cond.get(),
+    auto r = TableManager::executeSelect(path_res.path, cond.get(),
                                 {"pass_hash", "salt"}, {}, {}, cb);
+    r.throw_if_error();
 
     if (db_hash.empty() || db_salt.empty()) return false;
     return hashPassword(password, db_salt) == db_hash;
@@ -211,7 +212,9 @@ bool AuthManager::checkAccess(const std::string& username,
             std::make_unique<LogicalNode>("AND",
                 std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
                 std::make_unique<ComparisonNode>("action",  "==", Value(action))));
-        TableManager::executeSelect(perm_path.path, c.get(), {"grantee"}, {}, {}, check_cb);
+        auto r = TableManager::executeSelect(perm_path.path, c.get(), {"grantee"}, {}, {}, check_cb);
+        r.throw_if_error();
+        
         if (granted) return true;
     }
 
