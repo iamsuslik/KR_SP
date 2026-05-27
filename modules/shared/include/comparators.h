@@ -25,9 +25,9 @@ concept comparator = requires(const Compare c, const Key& lhs, const Key& rhs) {
 
 template<typename T>
 consteval std::size_t get_optimal_t() {
-    constexpr std::size_t overhead = 32;
-    constexpr std::size_t pair_size = sizeof(T) + 8;
-    constexpr std::size_t max_keys = (4096 - overhead) / (2 * pair_size);
+    constexpr std::size_t overhead = MAX_COLUMNS;
+    constexpr std::size_t pair_size = sizeof(T) + sizeof(RecordID);
+    constexpr std::size_t max_keys = (PAGE_SIZE - overhead) / (2 * pair_size);
     return (max_keys > 2) ? max_keys : 2;
 }
 
@@ -47,16 +47,16 @@ namespace Engine {
     struct RelationalOp {
         static bool eval(const T& lhs, const T& rhs, const std::string& op) noexcept {
             Comp c;
-            const bool less    = c(lhs, rhs);
+            const bool less = c(lhs, rhs);
             const bool greater = c(rhs, lhs);
-            const bool equal   = !less && !greater;
+            const bool equal = !less && !greater;
 
             if (op == "==" || op == "=")  return equal;
-            if (op == "!=")               return !equal;
-            if (op == "<")                return less;
-            if (op == ">")                return greater;
-            if (op == "<=")               return less || equal;
-            if (op == ">=")               return greater || equal;
+            if (op == "!=") return !equal;
+            if (op == "<") return less;
+            if (op == ">") return greater;
+            if (op == "<=") return less || equal;
+            if (op == ">=") return greater || equal;
             return false;
         }
     };
@@ -67,16 +67,16 @@ namespace Engine {
             if (op == "LIKE") {
                 return StringLike(lhs, rhs);
             }
-            const bool less    = lhs < rhs;
+            const bool less = lhs < rhs;
             const bool greater = rhs < lhs;
-            const bool equal   = !less && !greater;
+            const bool equal = !less && !greater;
 
             if (op == "==" || op == "=")  return equal;
-            if (op == "!=")               return !equal;
-            if (op == "<")                return less;
-            if (op == ">")                return greater;
-            if (op == "<=")               return less || equal;
-            if (op == ">=")               return greater || equal;
+            if (op == "!=") return !equal;
+            if (op == "<") return less;
+            if (op == ">") return greater;
+            if (op == "<=") return less || equal;
+            if (op == ">=") return greater || equal;
             return false;
         }
 

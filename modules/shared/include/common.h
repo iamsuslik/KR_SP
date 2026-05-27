@@ -24,6 +24,12 @@ constexpr int N_NODES = 4;
 
 constexpr int NODE_QUERY_BUFFER = 65536;
 
+constexpr int MAX_SHARED_TASKS = 1000;
+constexpr int SHARED_RESULT_SIZE = 65536; 
+constexpr int MAX_SESSIONS = 1024;
+constexpr int GUID_SIZE = 37;
+constexpr int TIME_SIZE = 26;
+
 #include "comparators.h"
 
 struct NodeControl {
@@ -31,7 +37,7 @@ struct NodeControl {
     sem_t sem_task;
     sem_t sem_ready;
     char query_buffer[NODE_QUERY_BUFFER];
-    char task_guid[37];
+    char task_guid[GUID_SIZE];
     char current_db[MAX_NAME_LEN];
     int64_t last_seen;
     bool is_busy;
@@ -168,19 +174,15 @@ struct TableHeader {
 
 using Row = std::vector<Value>;
 
-constexpr int MAX_SHARED_TASKS = 1000;
-constexpr int SHARED_RESULT_SIZE = 65536; 
-constexpr int MAX_SESSIONS = 1024;
-
 enum class AsyncStatus : int { PENDING = 0, PROCESSING = 1, COMPLETED = 2, FAILED = 3 };
 
 #pragma pack(push, 1)
 struct SharedTaskSlot {
-    char guid[37];
+    char guid[GUID_SIZE];
     AsyncStatus status;
     StatusCode db_code;
     char result_data[SHARED_RESULT_SIZE];
-    char completion_time[26];
+    char completion_time[TIME_SIZE];
     bool is_used;
 };
 
@@ -211,7 +213,7 @@ struct [[nodiscard]] Result {
 };
 
 struct WorkerContext {
-    char guid[37];
+    char guid[GUID_SIZE];
     char query[NODE_QUERY_BUFFER];
     char current_db[MAX_NAME_LEN];
     int  client_fd;
