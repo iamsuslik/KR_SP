@@ -205,11 +205,7 @@ struct [[nodiscard]] Result {
     std::string path = "";
 
     bool isOk() const { return code == StatusCode::OK; }
-    void throw_if_error() const {
-        if (code != StatusCode::OK) {
-            throw std::runtime_error(details.empty() ? "Database Error" : details);
-        }
-    }
+    void throw_if_error() const ;
     static Result Success(RecordID r = {0,0}, std::string d = "") { return {StatusCode::OK, d, r}; }
     static Result Error(StatusCode c, std::string d = "") { return {c, std::move(d)}; }
 };

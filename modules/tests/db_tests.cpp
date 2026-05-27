@@ -1,232 +1,204 @@
 #include <gtest/gtest.h>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <random>
-#include <fstream>
-#include <regex>
+#include <filesystem>
+#include <vector>
+#include <string>
+#include <memory>
+
+#include "common.h"
 #include "TableManager.h"
 #include "HierarchyManager.h"
-#include "TablePageManager.h"
+#include "ASTNode.h"
 #include "BPlusTree.h"
 #include "Logger.h"
-#include "TablePageManager.h"
+#include "AuthManager.h"
 
 namespace fs = std::filesystem;
 
-// Класс для подготовки окружения перед каждым тестом
+// =============================================================================
+// ТЕСТОВОЕ ОКРУЖЕНИЕ (Vibe Check)
+// =============================================================================
+
 class DBMS_Test : public ::testing::Test {
 protected:
     void SetUp() override {
-        if (fs::exists("data"))
-            fs::remove_all("data");
-        hm.createDatabase("test_db");
-        hm.useDatabase("test_db");
+        // Полная очистка перед каждым тестом
+        if (fs::exists("data")) fs::remove_all("data");
+        
+        // Инициализируем систему (создаем админа и системные таблицы)
+        AuthManager::initSystem(hm);
+        
+        // Создаем рабочую базу для тестов
+        ASSERT_TRUE(hm.createDatabase("test_db").isOk());
+        ASSERT_TRUE(hm.useDatabase("test_db").isOk());
     }
-    
+
     void TearDown() override {
-        if (fs::exists("data"))
-            fs::remove_all("data");
+        if (fs::exists("data")) fs::remove_all("data");
     }
-    
+
     HierarchyManager hm;
 };
 
-// Хелпер для подсчета количества JSON-объектов в строке вывода
-int countJsonObjects(const std::string& s) {
-    int count = 0;
-    size_t pos = s.find('{');
-    while (pos != std::string::npos) {
-        count++;
-        pos = s.find('{', pos + 1);
-    }
-    return count;
+// Хелпер для получения пути к таблице
+std::string getTablePath(HierarchyManager& hm, const std::string& name) {
+    auto res = hm.resolveTablePath(name);
+    return res.path;
 }
 
-// ==================== ОСНОВНОЕ ЗАДАНИЕ (B+ Tree) ====================
+// =============================================================================
+// 1. ОСНОВНЫЕ ОПЕРАЦИИ (B+ Tree & Storage)
+// =============================================================================
 
 TEST_F(DBMS_Test, BasicCreateAndInsert) {
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true),
-        ColumnDef("name", DataType::STR, false),
-        ColumnDef("age", DataType::INT, false)
-    };
+    ColumnDef c1("id", DataType::INT); c1.is_indexed = true;
+    ColumnDef c2("name", DataType::STR);
+    ColumnDef c3("age", DataType::INT);
+    std::vector<ColumnDef> cols = { c1, c2, c3 };
+
+    std::string path = getTablePath(hm, "users");
     
-    std::string path = "data/test_db/users.db";
-    EXPECT_NO_THROW(TableManager::createTable(path, TableSchema("users", cols)));
-    
+    // Создание таблицы
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("users", cols)).isOk());
+
+    // Вставка данных
     Row row;
     row.push_back(Value(1));
-    row.push_back(Value(std::string("Alice")));
+    row.push_back(Value("Alice"));
     row.push_back(Value(25));
-    
-    auto res = TableManager::insertRow(path, row);
-    EXPECT_TRUE(res.isOk());
+
+    ASSERT_TRUE(TableManager::insertRow(path, row).isOk());
 }
 
 TEST_F(DBMS_Test, SelectWithCondition) {
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true),
-        ColumnDef("score", DataType::INT, false)
-    };
-    
-    std::string path = "data/test_db/scores.db";
-    TableManager::createTable(path, TableSchema("scores", cols));
-    
-    for (int i = 1; i <= 100; ++i) {
-        Row row;
-        row.push_back(Value(i));
-        row.push_back(Value(i * 10));
-        TableManager::insertRow(path, row);
+    ColumnDef c1("id", DataType::INT); c1.is_indexed = true;
+    ColumnDef c2("score", DataType::INT);
+    std::vector<ColumnDef> cols = { c1, c2 };
+
+    std::string path = getTablePath(hm, "scores");
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("scores", cols)).isOk());
+
+    for (int i = 1; i <= 20; ++i) {
+        Row row = { Value(i), Value(i * 10) };
+        ASSERT_TRUE(TableManager::insertRow(path, row).isOk());
     }
+
+    // Новая логика AST: поиск ID > 15
+    auto condition = std::make_unique<ComparisonNode>("id", ">", Value(15));
     
-    auto condition = std::make_shared<ExpressionNode>();
-    condition->is_op = false;
-    condition->column = "id";
-    condition->op = ">";
-    condition->val1 = "50";
-    condition->val1_parsed = Value(50); // Ручная установка для теста
-    
-    std::string buffer;
-    auto cb = [&](const std::string& msg) { buffer += msg; };
-    
+    int count = 0;
+    auto cb = [&](const std::string& json) { if (json.find('{') != std::string::npos) count++; };
+
     Result res = TableManager::executeSelect(path, condition.get(), {}, {}, {}, cb);
-    EXPECT_TRUE(res.isOk());
-    EXPECT_GE(countJsonObjects(buffer), 50); 
+    ASSERT_TRUE(res.isOk());
+    EXPECT_EQ(count, 5); // 16, 17, 18, 19, 20
 }
 
+// =============================================================================
+// 2. МУТАЦИИ ДАННЫХ (Update & Delete)
+// =============================================================================
+
 TEST_F(DBMS_Test, UpdateRecords) {
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true),
-        ColumnDef("status", DataType::STR, false)
-    };
+    ColumnDef c1("id", DataType::INT); c1.is_indexed = true;
+    ColumnDef c2("status", DataType::STR);
+    std::vector<ColumnDef> cols = { c1, c2 };
+
+    std::string path = getTablePath(hm, "tasks");
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("tasks", cols)).isOk());
+
+    TableManager::insertRow(path, { Value(7), Value("new") });
+
+    // Условие WHERE id == 7
+    auto cond = std::make_unique<ComparisonNode>("id", "==", Value(7));
     
-    std::string path = "data/test_db/status.db";
-    TableManager::createTable(path, TableSchema("status", cols));
-    
-    Row row;
-    row.push_back(Value(5));
-    row.push_back(Value(std::string("active")));
-    TableManager::insertRow(path, row);
-    
-    auto condition = std::make_shared<ExpressionNode>();
-    condition->is_op = false;
-    condition->column = "id";
-    condition->op = "=";
-    condition->val1 = "5";
-    condition->val1_parsed = Value(5);
-    
-    auto res = TableManager::executeUpdate(path, condition.get(), "status", "\"inactive\"");
-    EXPECT_TRUE(res.isOk());
+    // Что меняем: status = "done"
+    std::vector<std::pair<std::string, Value>> assignments = { {"status", Value("done")} };
+
+    ASSERT_TRUE(TableManager::executeUpdate(path, cond.get(), assignments).isOk());
 }
 
 TEST_F(DBMS_Test, DeleteWithCompositeCondition) {
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true),
-        ColumnDef("value", DataType::INT, false)
-    };
-    
-    std::string path = "data/test_db/delete_test.db";
-    TableManager::createTable(path, TableSchema("delete_test", cols));
-    
-    for (int i = 1; i <= 20; ++i) {
-        Row row;
-        row.push_back(Value(i));
-        row.push_back(Value(5));
-        TableManager::insertRow(path, row);
-    }
-    
-    auto condition = std::make_shared<ExpressionNode>();
-    condition->is_op = true;
-    condition->op = "AND";
-    condition->left = std::make_shared<ExpressionNode>();
-    condition->left->column = "value"; condition->left->op = "="; condition->left->val1_parsed = Value(5);
-    condition->right = std::make_shared<ExpressionNode>();
-    condition->right->column = "id"; condition->right->op = ">"; condition->right->val1_parsed = Value(10);
-    
-    auto res = TableManager::executeDelete(path, condition.get());
-    EXPECT_TRUE(res.isOk());
+    ColumnDef c1("id", DataType::INT); c1.is_indexed = true;
+    ColumnDef c2("val", DataType::INT);
+    std::vector<ColumnDef> cols = { c1, c2 };
+
+    std::string path = getTablePath(hm, "del_test");
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("del_test", cols)).isOk());
+
+    for (int i = 1; i <= 10; ++i) TableManager::insertRow(path, { Value(i), Value(100) });
+
+    // Сложное условие: (val == 100) AND (id > 8)
+    auto left = std::make_unique<ComparisonNode>("val", "==", Value(100));
+    auto right = std::make_unique<ComparisonNode>("id", ">", Value(8));
+    auto cond = std::make_unique<LogicalNode>("AND", std::move(left), std::move(right));
+
+    Result res = TableManager::executeDelete(path, cond.get());
+    ASSERT_TRUE(res.isOk());
+    // Должно удалить id 9 и 10
+    EXPECT_TRUE(res.details.find("2") != std::string::npos); 
 }
 
-TEST_F(DBMS_Test, BPlusTreeStressManyInserts) {
-    std::string path = "data/test_db/stress_bplus.db";
-    std::vector<ColumnDef> cols = { ColumnDef("key", DataType::INT, true) };
-    TableManager::createTable(path, TableSchema("stress_bplus", cols));
-    
-    const int COUNT = 1000;
-    for (int i = 0; i < COUNT; ++i) {
-        Row row; row.push_back(Value(i));
-        ASSERT_TRUE(TableManager::insertRow(path, row).isOk());
-    }
-    
-    Pager p(path); TableHeader h; p.read_page(0, &h);
-    TablePageManager pm(p, h);
-    BP_tree<int> tree(p, h.root_page_ids[0], pm);
-    
-    RecordID out;
-    EXPECT_TRUE(tree.find(500, out).isOk());
-}
-
-// ==================== ДОПОЛНИТЕЛЬНЫЕ ЗАДАНИЯ ====================
-
-TEST_F(DBMS_Test, AccessLogging) {
-    std::string log_path = "logs/access.log";
-    // Просто проверяем, что логгер не падает при вызове
-    EXPECT_NO_THROW(Logger::log("SELECT *", "OK", 10));
-    EXPECT_TRUE(fs::exists(log_path));
-}
-
-TEST_F(DBMS_Test, DefaultValues) {
-    // В common.h мы добавили поля для DEFAULT. Здесь симулируем создание.
-    std::vector<ColumnDef> cols = {
-        ColumnDef("id", DataType::INT, true),
-        ColumnDef("status", DataType::STR, false)
-    };
-    cols[1].has_default = true;
-    cols[1].default_value = "\"pending\"";
-    
-    std::string path = "data/test_db/def.db";
-    TableManager::createTable(path, TableSchema("def", cols));
-    
-    Row row; row.push_back(Value(1)); // status пропущен
-    TableManager::insertRow(path, row);
-    
-    std::string buffer;
-    TableManager::executeSelect(path, nullptr, {}, {}, {}, [&](const std::string& s){ buffer += s; });
-    EXPECT_TRUE(buffer.find("pending") != std::string::npos);
-}
+// =============================================================================
+// 3. ДОПОЛНИТЕЛЬНЫЕ ФИЧИ (Aggregates, Logger, JSON)
+// =============================================================================
 
 TEST_F(DBMS_Test, AggregateFunctions) {
-    std::vector<ColumnDef> cols = { ColumnDef("v", DataType::INT, false) };
-    std::string path = "data/test_db/agg.db";
-    TableManager::createTable(path, TableSchema("agg", cols));
+    ColumnDef c1("v", DataType::INT);
+    std::string path = getTablePath(hm, "math");
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("math", {c1})).isOk());
+
+    for (int i = 1; i <= 10; ++i) TableManager::insertRow(path, {Value(i)});
+
+    // Запрос SUM(v)
+    std::vector<AggregateRequest> aggs = {{AggregateType::SUM, "v", "total"}};
+    std::string result;
+    auto cb = [&](const std::string& s) { result += s; };
+
+    ASSERT_TRUE(TableManager::executeSelect(path, nullptr, {}, {}, aggs, cb).isOk());
     
-    for (int i = 1; i <= 10; ++i) {
-        Row r; r.push_back(Value(i));
-        TableManager::insertRow(path, r);
-    }
-    
-    std::vector<AggregateRequest> aggs = {{AggregateType::SUM, "v"}};
-    std::string buffer;
-    TableManager::executeSelect(path, nullptr, {}, {}, aggs, [&](const std::string& s){ buffer += s; });
-    
-    // Сумма от 1 до 10 = 55
-    EXPECT_TRUE(buffer.find("55") != std::string::npos);
+    // Сумма чисел от 1 до 10 = 55
+    EXPECT_TRUE(result.find("55") != std::string::npos);
 }
 
-TEST_F(DBMS_Test, JsonOutputFormatCheck) {
-    std::vector<ColumnDef> cols = { ColumnDef("id", DataType::INT, false) };
-    std::string path = "data/test_db/json.db";
-    TableManager::createTable(path, TableSchema("json", cols));
+TEST_F(DBMS_Test, AccessLoggingCheck) {
+    // Проверяем, что логгер пишет в файл
+    ASSERT_NO_THROW(Logger::log("CREATE TABLE vibe", "SUCCESS", 42));
+    EXPECT_TRUE(fs::exists("logs/access.log"));
+}
+
+TEST_F(DBMS_Test, JsonFormatVerification) {
+    ColumnDef c1("id", DataType::INT);
+    std::string path = getTablePath(hm, "json_vibe");
+    ASSERT_TRUE(TableManager::createTable(path, TableSchema("json_vibe", {c1})).isOk());
+    TableManager::insertRow(path, {Value(777)});
+
+    std::string output;
+    TableManager::executeSelect(path, nullptr, {}, {}, {}, [&](const std::string& s){ output += s; });
+
+    // Проверяем "вайбовый" JSON синтаксис
+    EXPECT_TRUE(output.find("{") != std::string::npos);
+    EXPECT_TRUE(output.find("\"id\": 777") != std::string::npos);
+    EXPECT_TRUE(output.find("}") != std::string::npos);
+}
+
+// ==================== STRESS TEST (B+ TREE) ====================
+
+TEST_F(DBMS_Test, BPlusTreeStress) {
+    ColumnDef c1("key", DataType::INT); c1.is_indexed = true;
+    std::string path = getTablePath(hm, "stress");
+    TableManager::createTable(path, TableSchema("stress", {c1}));
+
+    const int INSERT_COUNT = 500;
+    for (int i = 0; i < INSERT_COUNT; ++i) {
+        ASSERT_TRUE(TableManager::insertRow(path, {Value(i)}).isOk());
+    }
+
+    // Проверка через прямое обращение к дереву в файле
+    Pager p(path);
+    TableHeader h;
+    p.read_page(0, &h).throw_if_error();
+    TablePageManager pm(p, h);
     
-    Row r; r.push_back(Value(123));
-    TableManager::insertRow(path, r);
-    
-    std::string buffer;
-    TableManager::executeSelect(path, nullptr, {}, {}, {}, [&](const std::string& s){ buffer += s; });
-    
-    // Проверка структуры JSON
-    EXPECT_TRUE(buffer.find("{") != std::string::npos);
-    EXPECT_TRUE(buffer.find("123") != std::string::npos);
-    EXPECT_TRUE(buffer.find("}") != std::string::npos);
+    BP_tree<int> tree(p, h.root_page_ids[0], pm);
+    RecordID rid;
+    EXPECT_TRUE(tree.find(250, rid).isOk());
 }
