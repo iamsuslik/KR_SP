@@ -55,10 +55,7 @@ Result HierarchyManager::dropDatabase(const std::string& db_name) {
         return Result::Error(StatusCode::DATABASE_NOT_FOUND, "Database '" + db_name + "' does not exist.");
     }
 
-    {
-        std::unique_lock lock(db_mtx);
-        if (current_db == db_name) current_db.clear();
-    }
+    if (current_db == db_name) current_db.clear();
 
     Result res = Result::Success();
     res.details = "Database '" + db_name + "' dropped.";
@@ -69,17 +66,15 @@ Result HierarchyManager::useDatabase(const std::string& db_name) {
     fs::path db_path = node_root(-1) / db_name;
     if (!fs::exists(db_path))
         return Result::Error(StatusCode::DATABASE_NOT_FOUND, "Database '" + db_name + "' does not exist.");
-    {
-        std::unique_lock lock(db_mtx);
-        current_db = db_name;
-    }
+
+    current_db = db_name;
+
     Result res = Result::Success();
     res.details = "Database changed to '" + db_name + "'.";
     return res;
 }
 
 std::string HierarchyManager::getCurrentDB() const {
-    std::shared_lock lock(db_mtx);
     return current_db;
 }
 
@@ -90,7 +85,6 @@ Result HierarchyManager::resolveTablePath(const std::string& input_name, int nod
         target_db = input_name.substr(0, dot);
         table_name = input_name.substr(dot + 1);
     } else {
-        std::shared_lock lock(db_mtx);
         target_db = current_db;
         table_name = input_name;
     }
