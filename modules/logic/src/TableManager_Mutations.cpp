@@ -174,13 +174,9 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        bool is_index_page = false;
-        for (int i = 0; i < MAX_COLUMNS; ++i) {
-            if (header.root_page_ids[i] == p) { is_index_page = true; break; }
-        }
-        if (is_index_page) continue;
-
         if (!pager.read_page(p, page_buffer).isOk()) continue;
+
+        if (isIndexPage(page_buffer)) continue;
 
         if (page_has_space(page_buffer, rec_size)) {
             return {p, 0};
@@ -196,7 +192,7 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
     try {
         uint32_t new_p = pager.allocate_page();
         alignas(PAGE_SIZE) char clean[PAGE_SIZE];
-        RecordManager::initPage(clean);
+        RecordManager::initPage(clean); 
         pager.write_page(new_p, clean).throw_if_error();
         return {new_p, 0};
     } catch (...) {
@@ -208,10 +204,10 @@ RecordID TableManager::findAvailableSlot(Pager& pager, TableHeader& header,
 Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     int fd_to_unlock = -1;
 
-    try {
-        Pager pager(full_path);
-        fd_to_unlock = pager.get_fd();
+    Pager pager(full_path);
+    fd_to_unlock = pager.get_fd();
 
+    try {
         // 1. Пытаемся заблокировать таблицу. Если не вышло — сразу выходим.
         if (!TableLockManager::lock_table(fd_to_unlock, true)) {
             return Result::Error(StatusCode::IO_ERROR, "Не удалось заблокировать таблицу для записи");
@@ -321,10 +317,10 @@ Result TableManager::executeUpdate(
         const std::vector<std::pair<std::string, Value>>& assignments) {
 
     int fd_to_unlock = -1;
-    try {
-        Pager pager(full_path);
-        fd_to_unlock = pager.get_fd();
+    Pager pager(full_path);
+    fd_to_unlock = pager.get_fd();
 
+    try {
         TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/true);
 
         TableHeader header;
@@ -379,9 +375,11 @@ int TableManager::fullScanUpdate(
     int count = 0;
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
 
-    for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        if (isIndexPage(header, p)) continue;
+    for (uint32_t p = 1; p < pager.get_page_count(); ++p) {\
+        
         if (!pager.read_page(p, page_buffer).isOk()) continue;
+
+        if (isIndexPage(page_buffer)) continue;
 
         bool page_dirty = false;
         const uint16_t scount = get_hdr(page_buffer)->slot_count;
@@ -403,28 +401,27 @@ int TableManager::fullScanUpdate(
             pager.write_page(p, page_buffer).throw_if_error();
         }
     }
+
     pager.write_page(0, &header).throw_if_error();
     return count;
 }
 
 Result TableManager::executeDelete(const std::string& full_path, const ASTNode* cond) {
     int fd_to_unlock = -1;
-    try {
-        Pager pager(full_path);
-        fd_to_unlock = pager.get_fd();
+    Pager pager(full_path);
+    fd_to_unlock = pager.get_fd();
 
-        // 1. ЗАЩИТА: Явно проверяем, удалось ли захватить блокировку.
-        // Если другой процесс завис, мы не должны пытаться удалять данные «вслепую».
+    try {
         if (!TableLockManager::lock_table(fd_to_unlock, true)) {
             return Result::Error(StatusCode::IO_ERROR, "Не удалось заблокировать таблицу для удаления (файл занят)");
         }
 
         TableHeader header;
-        // 2. ЗАЩИТА: Читаем заголовок с проверкой I/O.
+        // Читаем заголовок с проверкой I/O.
         pager.read_page(0, &header).throw_if_error();
 
         RecordID rid;
-        // 3. ОПТИМИЗАЦИЯ: Пытаемся найти запись через индекс.
+        // Пытаемся найти запись через индекс.
         Result idx_res = getRIDFromIndex(pager, header, cond, rid);
 
         if (idx_res.isOk()) {
@@ -438,17 +435,17 @@ Result TableManager::executeDelete(const std::string& full_path, const ASTNode* 
                 return Result::Success({0,0}, "Удалено 0 строк (Запись уже пуста)");
             }
 
-            // 4. ЗАЩИТА: Сначала чистим все индексы, привязанные к этой строке.
+            // Сначала чистим все индексы, привязанные к этой строке.
             // Если индекс сломан, clearIndicesForRow выбросит исключение.
             clearIndicesForRow(pager, header, row);
 
-            // 5. Логическое удаление из страницы
+            // Логическое удаление из страницы
             Slot* slots = get_slots(buf);
             slots[rid.slot_id].length = 0;
             slots[rid.slot_id].offset = 0;
             recalc_free_space(get_hdr(buf));
 
-            // 6. ЗАЩИТА: Физически записываем изменения. Если диск «отвалится», мы узнаем об этом здесь.
+            // Физически записываем изменения. Если диск «отвалится», мы узнаем об этом здесь.
             pager.write_page(rid.page_id, buf).throw_if_error();
             pager.write_page(0, &header).throw_if_error();
 
@@ -462,7 +459,7 @@ Result TableManager::executeDelete(const std::string& full_path, const ASTNode* 
             return idx_res;
         }
 
-        // 7. ПОЛНОЕ СКАНИРОВАНИЕ (если индекс не применим)
+        // ПОЛНОЕ СКАНИРОВАНИЕ (если индекс не применим)
         // Внутри fullScanDelete должны быть такие же вызовы throw_if_error()
         int count = fullScanDelete(pager, header, cond);
         
@@ -484,8 +481,10 @@ int TableManager::fullScanDelete(Pager& pager, TableHeader& header, const ASTNod
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        if (isIndexPage(header, p)) continue;
+        
         if (!pager.read_page(p, page_buffer).isOk()) continue;
+
+        if (isIndexPage(page_buffer)) continue;
 
         bool page_dirty = false;
         const uint16_t scount = get_hdr(page_buffer)->slot_count;

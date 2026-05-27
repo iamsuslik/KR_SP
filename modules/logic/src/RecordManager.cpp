@@ -5,6 +5,7 @@
 void RecordManager::initPage(char* page_buffer) {
     std::memset(page_buffer, 0, PAGE_SIZE);
     PageHeader* hdr = reinterpret_cast<PageHeader*>(page_buffer);
+    hdr->page_type = 0;
     hdr->slot_count = 0;
     hdr->free_ptr = PAGE_SIZE;
     hdr->free_space = PAGE_SIZE - sizeof(PageHeader);

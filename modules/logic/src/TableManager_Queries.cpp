@@ -294,8 +294,8 @@ void TableManager::fullScanSelect(Pager& pager, TableHeader& header,
     alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
 
     for (uint32_t p = 1; p < pager.get_page_count(); ++p) {
-        if (isIndexPage(header, p)) continue;
         if (!pager.read_page(p, page_buffer).isOk()) continue;
+        if (isIndexPage(page_buffer)) continue;
 
         const auto* phdr = get_hdr(page_buffer);
         for (uint16_t i = 0; i < phdr->slot_count; ++i) {
@@ -359,10 +359,9 @@ Result TableManager::executeSelect(const std::string& full_path,
                                    const std::vector<AggregateRequest>& aggs,
                                    OutputCallback callback) {
     int fd_to_unlock = -1;
+    Pager pager(full_path);
+    fd_to_unlock = pager.get_fd();
     try {
-        Pager pager(full_path);
-        fd_to_unlock = pager.get_fd();
-
         TableLockManager::lock_table(fd_to_unlock, /*exclusive=*/false);
 
         TableHeader header;
@@ -403,12 +402,6 @@ Result TableManager::executeSelect(const std::string& full_path,
     }
 }
 
-bool TableManager::isIndexPage(const TableHeader& header, uint32_t page_id) {
-    for (int i = 0; i < MAX_COLUMNS; ++i) {
-        if (header.root_page_ids[i] == page_id) return true;
-    }
-    return false;
-}
 
 Row TableManager::getRowFromSlot(const char* page_buffer, uint16_t slot_id, const TableHeader& header) {
     const Slot* slots = get_slots(page_buffer);

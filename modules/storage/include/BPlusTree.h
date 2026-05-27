@@ -61,10 +61,11 @@ private:
 
     struct bptree_node_base
     {
+        uint16_t page_type;
         bool _is_terminate; 
         uint32_t _count;    
         
-        bptree_node_base() : _is_terminate(false), _count(0) {}
+        bptree_node_base() : page_type(1), _is_terminate(false), _count(0) {}
     };
 
     struct bptree_node_term : public bptree_node_base
@@ -543,6 +544,10 @@ Result BP_tree<tkey, t, compare>::insert(const tkey& key, const RecordID& rid) {
 
     if (_root_id == 0) {
         uint32_t new_root_id = allocate_new_page();
+
+        if (new_root_id == 0) {
+            return Result::Error(StatusCode::OUT_OF_MEMORY, "Не удалось выделить страницу для корня индекса");
+        }
         
         alignas(PAGE_SIZE) char buffer[PAGE_SIZE];
         std::memset(buffer, 0, PAGE_SIZE);

@@ -55,7 +55,9 @@ private:
     static inline Slot* get_slots(char* buf) { return reinterpret_cast<Slot*>(buf + sizeof(PageHeader)); }
     static inline const Slot* get_slots(const char* buf) { return reinterpret_cast<const Slot*>(buf + sizeof(PageHeader)); }
 
-    static bool isIndexPage(const TableHeader& header, uint32_t page_id);
+    static inline bool isIndexPage(const char* page_buffer) {
+        return get_hdr(page_buffer)->page_type == 1; 
+    }
     static Row getRowFromSlot(const char* page_buffer, uint16_t slot_id, const TableHeader& header);
 
     static void recalc_free_space(PageHeader* hdr);

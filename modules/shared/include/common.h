@@ -136,6 +136,7 @@ struct RecordID {
 
 #pragma pack(push, 1)
 struct PageHeader {
+    uint16_t page_type;
     uint16_t slot_count;
     uint16_t free_ptr;
     uint16_t free_space;
