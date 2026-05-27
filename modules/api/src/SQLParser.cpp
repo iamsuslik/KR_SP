@@ -567,10 +567,12 @@ std::unique_ptr<Statement> SQLParser::parseDrop() {
 
 std::unique_ptr<Statement> SQLParser::parseAuth() {
     consume();
-    const std::string user =
-        expect(TokenType::IDENTIFIER, "Ожидалось имя пользователя").value;
-    const std::string pass = consume().value;
-    match(TokenType::SEMICOLON);
+    if (match(TokenType::KEYWORD, "JWT")) {
+        std::string token = expect(TokenType::STRING_LITERAL, "Ожидался JWT токен").value;
+        return std::make_unique<AuthJwtStatement>(token);
+    }
+    std::string user = expect(TokenType::IDENTIFIER, "Username").value;
+    std::string pass = expect(TokenType::IDENTIFIER, "Password").value;
     return std::make_unique<AuthStatement>(user, pass);
 }
 
