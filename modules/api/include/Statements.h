@@ -48,7 +48,7 @@ public:
         : table_(std::move(t)), cols_(std::move(c)), where_(std::move(w)),
           aggs_(std::move(a)), aliases_(std::move(al)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         std::string db_part = table_;
         auto dot = table_.find('.');
         if (dot != std::string::npos) db_part = table_.substr(0, dot);
@@ -172,7 +172,7 @@ public:
                     std::unique_ptr<ASTNode>  w)
         : table_(std::move(t)), assignments_(std::move(a)), where_(std::move(w)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         std::string db_part = table_;
         auto dot = table_.find('.');
         if (dot != std::string::npos) db_part = table_.substr(0, dot);
@@ -199,7 +199,7 @@ public:
                     std::unique_ptr<ASTNode> w)
         : table_(std::move(t)), where_(std::move(w)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         std::string db_part = table_;
         auto dot = table_.find('.');
         if (dot != std::string::npos) db_part = table_.substr(0, dot);
@@ -351,7 +351,7 @@ class AuthStatement : public Statement {
 public:
     AuthStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         if (AuthManager::authenticate(user_, pass_, hm)) {
 
             std::string token = AuthManager::createToken(user_);
@@ -368,7 +368,7 @@ class CreateUserStatement : public Statement {
 public:
     CreateUserStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         std::string salt = AuthManager::generateRandomSalt();
         std::string hash = AuthManager::hashPassword(pass_, salt);
         
@@ -392,7 +392,7 @@ public:
     AlterDbAddGroupStatement(std::string db, std::string g)
         : db_(std::move(db)), group_(std::move(g)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         auto res = hm.resolveTablePath("_system.groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
@@ -412,7 +412,7 @@ public:
     AlterUserAddToGroupStatement(std::string u, std::string db, std::string g)
         : user_(std::move(u)), db_(std::move(db)), group_(std::move(g)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         auto res = hm.resolveTablePath("_system.user_groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
@@ -434,7 +434,7 @@ public:
     AlterUserAddPermStatement(std::string u, std::string db, std::vector<std::string> p)
         : user_(std::move(u)), db_(std::move(db)), perms_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         auto res = hm.resolveTablePath("_system.permissions");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
@@ -444,7 +444,8 @@ public:
             row.push_back(Value(0));
             row.push_back(Value(db_));
             row.push_back(Value(perm));
-            TableManager::insertRow(res.path, row);
+            Result r = TableManager::insertRow(res.path, row);
+            if (!r.isOk()) return r;
         }
         cb("[RBAC] Права для пользователя '" + user_ + "' в БД '" + db_ + "' обновлены.\n");
         return Result::Success();
@@ -458,7 +459,7 @@ public:
     AlterGroupAddPermStatement(std::string g, std::string db, std::vector<std::string> p)
         : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
         auto res = hm.resolveTablePath("_system.permissions");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
@@ -468,7 +469,8 @@ public:
             row.push_back(Value(1));
             row.push_back(Value(db_));
             row.push_back(Value(perm));
-            TableManager::insertRow(res.path, row);
+            Result r = TableManager::insertRow(res.path, row);
+            if (!r.isOk()) return r;
         }
         cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' добавлены.\n");
         return Result::Success();
@@ -496,7 +498,8 @@ public:
             auto and2 = std::make_unique<LogicalNode>("AND", std::move(c3), std::move(c4));
             auto final_cond = std::make_unique<LogicalNode>("AND", std::move(and1), std::move(and2));
 
-            TableManager::executeDelete(res.path, final_cond.get());
+            Result r = TableManager::executeDelete(res.path, final_cond.get());
+            if (!r.isOk()) return r;
         }
         
         cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' отозваны.\n");
