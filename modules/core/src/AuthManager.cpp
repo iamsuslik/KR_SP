@@ -163,7 +163,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
             ColumnDef("group_name", DataType::STR),
             ColumnDef("db_name",    DataType::STR)
         };
-        c[0].is_indexed = true;
+        c[0].is_indexed = false;
         auto p = hm.resolveTablePath("_system.user_groups", SYS_FD);
         TableManager::createTable(p.path, TableSchema("user_groups", c)).throw_if_error();
     }
@@ -174,7 +174,7 @@ void AuthManager::initSystem(HierarchyManager& hm) {
             ColumnDef("db_name",  DataType::STR),
             ColumnDef("action",   DataType::STR)
         };
-        c[0].is_indexed = true;
+        c[0].is_indexed = false;
         auto p = hm.resolveTablePath("_system.permissions", SYS_FD);
         TableManager::createTable(p.path, TableSchema("permissions", c)).throw_if_error();
     }

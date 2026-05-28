@@ -5,6 +5,7 @@
 #include "AsyncManager.h"
 #include "Logger.h"
 #include "TableLockManager.h"
+#include "AuthManager.h"
 #include "common.h"
 
 #include <iostream>
@@ -146,6 +147,9 @@ int main() {
     g_async_manager = &async; 
     TelemetryManager telemetry;
     SharedMemoryLayout* layout = async.getLayout();
+
+    HierarchyManager hm_init;
+    AuthManager::initSystem(hm_init); 
 
     for (int i = 0; i < N_NODES; ++i) {
         spawn_worker(i, layout, async);

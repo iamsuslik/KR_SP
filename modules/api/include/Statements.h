@@ -61,6 +61,7 @@ public:
     Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
         Result r = hm.useDatabase(db_);
         if (r.isOk()){ 
+            if (g_async_manager) g_async_manager->set_session_db(fd, db_);
             cb("[Success] " + r.details + "\n");
         }else{
             cb("[Error] "   + r.details + "\n");
@@ -568,7 +569,10 @@ public:
             row.push_back(Value(db_));
             row.push_back(Value(act));
             Result r = TableManager::insertRow(res.path, row);
-            if (!r.isOk()) return r;
+            if (!r.isOk()) {
+                cb("[Error] " + r.details + "\n");
+                return r;
+            }
         }
         cb("[RBAC] Права выданы '" + grantee_ + "' для БД '" + db_ + "'.\n");
         return Result::Success();

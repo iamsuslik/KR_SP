@@ -13,7 +13,7 @@
 
 class NetworkManager {
 public:
-    static constexpr int DEFAULT_PORT = 5432;
+    static constexpr int DEFAULT_PORT = 7432;
     static constexpr size_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB Limit
     static constexpr int IO_TIMEOUT_MS = 5000;
 

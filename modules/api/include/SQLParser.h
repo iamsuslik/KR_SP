@@ -18,7 +18,7 @@ public:
 
     Result process(const std::string& query,
                    HierarchyManager&  hm,
-                   int client_fd,
+                   const std::string& token,
                    OutputCallback callback);
 
 

@@ -169,11 +169,11 @@ Token SQLParser::expect(TokenType type, const std::string& errMsg) {
 
 Result SQLParser::process(const std::string& query,
                           HierarchyManager& hm,
-                          int client_fd,
+                          const std::string& token,
                           OutputCallback cb) {
     try {
         if (g_async_manager) {
-            const std::string active_db = g_async_manager->get_session_db(client_fd);
+            const std::string active_db = g_async_manager->get_session_db(token);
             if (!active_db.empty()) { auto _r2 = hm.useDatabase(active_db); (void)_r2; }
         }
 
@@ -200,9 +200,10 @@ Result SQLParser::process(const std::string& query,
         if (!stmt)
             return Result::Error(StatusCode::SYNTAX_ERROR, "Пустой запрос");
 
-        return stmt->execute(hm, client_fd, cb);
+        return stmt->execute(hm, token, cb);
 
     } catch (const DbException& e) {
+        cb("[Error] " + std::string(e.what()) + "\n");
         return Result::Error(e.code(), e.what());
     } catch (const std::exception& e) {
         return Result::Error(StatusCode::INTERNAL_ERROR, e.what());
@@ -225,7 +226,6 @@ std::unique_ptr<Statement> SQLParser::parseStatement() {
     if (cmd == "AUTH")   return parseAuth();
     if (cmd == "ALTER")  return parseAlter();
     if (cmd == "GET")    return parseGet();
-    // if (cmd == "REVERT") return parseRevert();
 
     throw DbException(StatusCode::SYNTAX_ERROR,
                       "Неизвестная команда: '" + t.value + "'");
@@ -724,10 +724,14 @@ std::vector<std::string> SQLParser::parseIdentifierList() {
 
     std::vector<std::string> list;
     do {
-        const std::string id =
-            expect(TokenType::IDENTIFIER, "Ожидался идентификатор в списке").value;
-        validateIdentifier(id, "identifier list");
-        list.push_back(id);
+        Token t = peek();
+        if (t.type == TokenType::IDENTIFIER || t.type == TokenType::KEYWORD) {
+            consume();
+            list.push_back(t.value);
+        } else {
+            throw DbException(StatusCode::SYNTAX_ERROR, 
+                "Ожидалось имя права (идентификатор), получено: '" + t.value + "'");
+        }
     } while (match(TokenType::COMMA));
 
     expect(TokenType::RPAREN, "Ожидалось ')' после списка");

@@ -131,28 +131,21 @@ AsyncResult AsyncManager::fetch_result(const std::string& guid) {
 }
 
 void AsyncManager::set_session_db(int fd, const std::string& db_name) {
-    auto& sessions = layout_->sessions;
+    // Для демо: всегда пишем в первую активную сессию
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (sessions[i].is_active && sessions[i].client_fd == fd) {
-            std::strncpy(sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
-            return;
-        }
-    }
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (!sessions[i].is_active) {
-            sessions[i].client_fd = fd;
-            sessions[i].is_active = true;
-            std::strncpy(sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+        if (layout_->sessions[i].is_active) {
+            std::strncpy(layout_->sessions[i].current_db, db_name.c_str(), MAX_NAME_LEN - 1);
+            layout_->sessions[i].current_db[MAX_NAME_LEN - 1] = '\0';
             return;
         }
     }
 }
 
 std::string AsyncManager::get_session_db(int fd) {
-    auto& sessions = layout_->sessions;
+    // Возвращаем базу из любой активной сессии
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (sessions[i].is_active && sessions[i].client_fd == fd) {
-            return std::string(sessions[i].current_db);
+        if (layout_->sessions[i].is_active) {
+            return std::string(layout_->sessions[i].current_db);
         }
     }
     return "";
@@ -170,26 +163,19 @@ void AsyncManager::close_session(int fd) {
 
 
 void AsyncManager::set_session_user(int fd, const std::string& username) {
-    // Приводим общую память к нашей структуре разметки
-    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
-    
-    // Ищем активную сессию этого сокета и записываем туда юзера
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
-            std::strncpy(layout->sessions[i].current_user, username.c_str(), MAX_NAME_LEN - 1);
-            layout->sessions[i].current_user[MAX_NAME_LEN - 1] = '\0';
-            return;
-        }
+        layout_->sessions[i].is_active = false;
     }
+    layout_->sessions[0].client_fd = fd;
+    layout_->sessions[0].is_active = true;
+    std::strncpy(layout_->sessions[0].current_user, username.c_str(), MAX_NAME_LEN - 1);
 }
 
 std::string AsyncManager::get_session_user(int fd) {
-    SharedMemoryLayout* layout = (SharedMemoryLayout*)shared_array;
-    
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (layout->sessions[i].is_active && layout->sessions[i].client_fd == fd) {
-            return std::string(layout->sessions[i].current_user);
+        if (layout_->sessions[i].is_active) {
+            return std::string(layout_->sessions[i].current_user);
         }
     }
-    return ""; // Пользователь не авторизован в этой сессии
+    return ""; 
 }
