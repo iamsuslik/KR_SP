@@ -573,33 +573,26 @@ class CreateUserStatement : public Statement {
   CreateUserStatement(std::string u, std::string p)
       : user_(std::move(u)), pass_(std::move(p)) {}
 
-  Result execute(HierarchyManager& hm, const std::string& token,
-                 OutputCallback cb) override {
-    auto auth = requireAccess(token, "_system", "ADMIN", hm);
-    if (!auth.isOk()) {
-      cb("[Error] " + auth.details + "\n");
-      return auth;
+    Result execute(HierarchyManager& hm, const std::string& token, OutputCallback cb) override {
+        auto auth = requireAccess(token, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        auto res = hm.resolveTablePath("_system.users");
+        if (!res.isOk()) {
+            cb("[Error] Системная БД не инициализирована.\n"); return res;
+        }
+
+        std::string salt = AuthManager::generateRandomSalt();
+        Row row;
+        row.push_back(Value(user_));
+        row.push_back(Value(AuthManager::hashPassword(pass_, salt)));
+        row.push_back(Value(salt));
+
+        Result r = TableManager::insertRow(res.path, row);
+        if (r.isOk()) cb("[Success] Пользователь '" + user_ + "' создан.\n");
+        else cb("[Error] " + r.details + "\n");
+        return r;
     }
-
-    auto res = hm.resolveTablePath("_system.users", g_current_node_id);
-    if (!res.isOk()) {
-      cb("[Error] Системная БД не инициализирована.\n");
-      return res;
-    }
-
-    std::string salt = AuthManager::generateRandomSalt();
-    Row row;
-    row.push_back(Value(user_));
-    row.push_back(Value(AuthManager::hashPassword(pass_, salt)));
-    row.push_back(Value(salt));
-
-    Result r = TableManager::insertRow(res.path, row);
-    if (r.isOk())
-      cb("[Success] Пользователь '" + user_ + "' создан.\n");
-    else
-      cb("[Error] " + r.details + "\n");
-    return r;
-  }
 };
 
 class AlterDbAddGroupStatement : public Statement {
@@ -609,27 +602,18 @@ class AlterDbAddGroupStatement : public Statement {
   AlterDbAddGroupStatement(std::string db, std::string g)
       : db_(std::move(db)), group_(std::move(g)) {}
 
-  Result execute(HierarchyManager& hm, const std::string& token,
-                 OutputCallback cb) override {
-    auto auth = requireAccess(token, "_system", "ADMIN", hm);
-    if (!auth.isOk()) {
-      cb("[Error] " + auth.details + "\n");
-      return auth;
+    Result execute(HierarchyManager& hm, const std::string& token, OutputCallback cb) override {
+        auto auth = requireAccess(token, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        auto res = hm.resolveTablePath("_system.groups");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        Row row; row.push_back(Value(group_)); row.push_back(Value(db_));
+        Result r = TableManager::insertRow(res.path, row);
+        if (r.isOk()) cb("[RBAC] Группа '" + group_ + "' создана для БД '" + db_ + "'.\n");
+        return r;
     }
-
-    auto res = hm.resolveTablePath("_system.groups", g_current_node_id);
-    if (!res.isOk())
-      return Result::Error(StatusCode::INTERNAL_ERROR,
-                           "RBAC не инициализирован");
-
-    Row row;
-    row.push_back(Value(group_));
-    row.push_back(Value(db_));
-    Result r = TableManager::insertRow(res.path, row);
-    if (r.isOk())
-      cb("[RBAC] Группа '" + group_ + "' создана для БД '" + db_ + "'.\n");
-    return r;
-  }
 };
 
 class AlterUserAddToGroupStatement : public Statement {
@@ -639,29 +623,21 @@ class AlterUserAddToGroupStatement : public Statement {
   AlterUserAddToGroupStatement(std::string u, std::string db, std::string g)
       : user_(std::move(u)), db_(std::move(db)), group_(std::move(g)) {}
 
-  Result execute(HierarchyManager& hm, const std::string& token,
-                 OutputCallback cb) override {
-    auto auth = requireAccess(token, "_system", "ADMIN", hm);
-    if (!auth.isOk()) {
-      cb("[Error] " + auth.details + "\n");
-      return auth;
+    Result execute(HierarchyManager& hm, const std::string& token, OutputCallback cb) override {
+        auto auth = requireAccess(token, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        auto res = hm.resolveTablePath("_system.user_groups");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        Row row;
+        row.push_back(Value(user_)); row.push_back(Value(group_)); row.push_back(Value(db_));
+        Result r = TableManager::insertRow(res.path, row);
+        if (r.isOk())
+            cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '"
+               + group_ + "' (БД: '" + db_ + "').\n");
+        return r;
     }
-
-    auto res = hm.resolveTablePath("_system.user_groups", g_current_node_id);
-    if (!res.isOk())
-      return Result::Error(StatusCode::INTERNAL_ERROR,
-                           "RBAC не инициализирован");
-
-    Row row;
-    row.push_back(Value(user_));
-    row.push_back(Value(group_));
-    row.push_back(Value(db_));
-    Result r = TableManager::insertRow(res.path, row);
-    if (r.isOk())
-      cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '" + group_ +
-         "' (БД: '" + db_ + "').\n");
-    return r;
-  }
 };
 
 class GrantPermStatement : public Statement {
@@ -678,34 +654,28 @@ class GrantPermStatement : public Statement {
         db_(std::move(db)),
         actions_(std::move(a)) {}
 
-  Result execute(HierarchyManager& hm, const std::string& token,
-                 OutputCallback cb) override {
-    auto auth = requireAccess(token, "_system", "ADMIN", hm);
-    if (!auth.isOk()) {
-      cb("[Error] " + auth.details + "\n");
-      return auth;
-    }
+    Result execute(HierarchyManager& hm, const std::string& token, OutputCallback cb) override {
+        auto auth = requireAccess(token, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-    auto res = hm.resolveTablePath("_system.permissions", g_current_node_id);
-    if (!res.isOk())
-      return Result::Error(StatusCode::INTERNAL_ERROR,
-                           "RBAC не инициализирован");
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
-    for (const auto& act : actions_) {
-      Row row;
-      row.push_back(Value(grantee_));
-      row.push_back(Value(is_group_ ? 1 : 0));
-      row.push_back(Value(db_));
-      row.push_back(Value(act));
-      Result r = TableManager::insertRow(res.path, row);
-      if (!r.isOk()) {
-        cb("[Error] " + r.details + "\n");
-        return r;
-      }
+        for (const auto& act : actions_) {
+            Row row;
+            row.push_back(Value(grantee_));
+            row.push_back(Value(is_group_ ? 1 : 0));
+            row.push_back(Value(db_));
+            row.push_back(Value(act));
+            Result r = TableManager::insertRow(res.path, row);
+            if (!r.isOk()) {
+                cb("[Error] " + r.details + "\n");
+                return r;
+            }
+        }
+        cb("[RBAC] Права выданы '" + grantee_ + "' для БД '" + db_ + "'.\n");
+        return Result::Success();
     }
-    cb("[RBAC] Права выданы '" + grantee_ + "' для БД '" + db_ + "'.\n");
-    return Result::Success();
-  }
 };
 
 class RevokePermStatement : public Statement {
@@ -722,38 +692,27 @@ class RevokePermStatement : public Statement {
         db_(std::move(db)),
         actions_(std::move(a)) {}
 
-  Result execute(HierarchyManager& hm, const std::string& token,
-                 OutputCallback cb) override {
-    auto auth = requireAccess(token, "_system", "ADMIN", hm);
-    if (!auth.isOk()) {
-      cb("[Error] " + auth.details + "\n");
-      return auth;
-    }
+    Result execute(HierarchyManager& hm, const std::string& token, OutputCallback cb) override {
+        auto auth = requireAccess(token, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-    auto res = hm.resolveTablePath("_system.permissions", g_current_node_id);
-    if (!res.isOk())
-      return Result::Error(StatusCode::INTERNAL_ERROR,
-                           "RBAC не инициализирован");
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
-    for (const auto& act : actions_) {
-      auto cond = std::make_unique<LogicalNode>(
-          "AND",
-          std::make_unique<ComparisonNode>("grantee", "==", Value(grantee_)),
-          std::make_unique<LogicalNode>(
-              "AND",
-              std::make_unique<ComparisonNode>("is_group",
-                                               "==", Value(is_group_ ? 1 : 0)),
-              std::make_unique<LogicalNode>(
-                  "AND",
-                  std::make_unique<ComparisonNode>("db_name", "==", Value(db_)),
-                  std::make_unique<ComparisonNode>("action",
-                                                   "==", Value(act)))));
-      Result r = TableManager::executeDelete(res.path, cond.get());
-      if (!r.isOk()) return r;
+        for (const auto& act : actions_) {
+            auto cond = std::make_unique<LogicalNode>("AND",
+                std::make_unique<ComparisonNode>("grantee",  "==", Value(grantee_)),
+                std::make_unique<LogicalNode>("AND",
+                    std::make_unique<ComparisonNode>("is_group", "==", Value(is_group_ ? 1 : 0)),
+                    std::make_unique<LogicalNode>("AND",
+                        std::make_unique<ComparisonNode>("db_name", "==", Value(db_)),
+                        std::make_unique<ComparisonNode>("action",  "==", Value(act)))));
+            Result r = TableManager::executeDelete(res.path, cond.get());
+            if (!r.isOk()) return r;
+        }
+        cb("[RBAC] Права отозваны у '" + grantee_ + "' для БД '" + db_ + "'.\n");
+        return Result::Success();
     }
-    cb("[RBAC] Права отозваны у '" + grantee_ + "' для БД '" + db_ + "'.\n");
-    return Result::Success();
-  }
 };
 
 class AlterUserAddPermStatement : public GrantPermStatement {

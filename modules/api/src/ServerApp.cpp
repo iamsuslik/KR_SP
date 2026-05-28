@@ -80,59 +80,58 @@ static std::string extract_table_name(const std::string& query) {
 [[noreturn]] static void worker_node_main(int node_id,
                                           SharedMemoryLayout* layout,
                                           AsyncManager& async) {
-  g_current_node_id = node_id;
-  NodeControl& ctrl = layout->nodes[node_id];
+    g_current_node_id = node_id;
+    NodeControl& ctrl = layout->nodes[node_id];
 
-  signal(SIGINT, SIG_IGN);
-  signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_DFL);
 
-  HierarchyManager hm;
+    HierarchyManager hm;
 
-  while (true) {
-    while (sem_wait(&ctrl.sem_task) != 0) {
-      if (errno == EINTR) continue;
-      perror("[Worker] sem_wait failed");
-      ::exit(EXIT_FAILURE);
+    while (true) {
+        while (sem_wait(&ctrl.sem_task) != 0) {
+            if (errno == EINTR) continue;
+            perror("[Worker] sem_wait failed");
+            ::exit(EXIT_FAILURE);
+        }
+
+        std::string raw_msg(ctrl.query_buffer);
+        std::string guid(ctrl.task_guid);
+
+        size_t delim = raw_msg.find("@@@");
+        std::string token = "";
+        std::string query = raw_msg;
+        if (delim != std::string::npos) {
+            token = raw_msg.substr(0, delim);
+            query = raw_msg.substr(delim + 3);
+        }
+
+        std::string db = async.get_session_db(token);
+        if (!db.empty()) hm.useDatabase(db).throw_if_error();
+
+        SQLParser parser;
+        std::string result_buf;
+        auto output_cb = [&](const std::string& s) { result_buf += s; };
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        Result res = parser.process(query, hm, token, output_cb);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+        async.update_task(guid, AsyncStatus::COMPLETED, res.code, result_buf);
+
+        std::string new_db = hm.getCurrentDB();
+        if (!new_db.empty() && !token.empty()) {
+            async.set_session_db(token, new_db);
+        }
+
+        Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", ms);
+
+        ctrl.last_seen = now_sec();
+        ctrl.is_busy = false;
+
+        sem_post(&ctrl.sem_ready);
     }
-
-    std::string raw_msg(ctrl.query_buffer);
-    std::string guid(ctrl.task_guid);
-
-    size_t delim = raw_msg.find("@@@");
-    std::string token = "";
-    std::string query = raw_msg;
-    if (delim != std::string::npos) {
-      token = raw_msg.substr(0, delim);
-      query = raw_msg.substr(delim + 3);
-    }
-
-    std::string db = async.get_session_db(token);
-    if (!db.empty()) hm.useDatabase(db);
-
-    SQLParser parser;
-    std::string result_buf;
-    auto output_cb = [&](const std::string& s) { result_buf += s; };
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-    Result res = parser.process(query, hm, token, output_cb);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    long long ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-    async.update_task(guid, AsyncStatus::COMPLETED, res.code, result_buf);
-
-    std::string new_db = hm.getCurrentDB();
-    if (!new_db.empty() && !token.empty()) {
-      async.set_session_db(token, new_db);
-    }
-
-    Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", ms);
-
-    ctrl.last_seen = now_sec();
-    ctrl.is_busy = false;
-
-    sem_post(&ctrl.sem_ready);
-  }
 }
 
 static void spawn_worker(int node_id, SharedMemoryLayout* layout,
