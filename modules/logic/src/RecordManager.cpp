@@ -78,6 +78,7 @@ Row RecordManager::extractRowDynamic(const char* record_ptr, const TableHeader& 
                 uint32_t str_len;
                 std::memcpy(&str_len, record_ptr + offset, sizeof(uint32_t));
                 offset += sizeof(uint32_t);
+                if (offset + str_len > PAGE_SIZE) throw std::runtime_error("Коррупция страницы: длина строки выходит за пределы PAGE_SIZE");
                 std::string s(record_ptr + offset, str_len);
                 row.push_back(Value(s));
                 offset += str_len;

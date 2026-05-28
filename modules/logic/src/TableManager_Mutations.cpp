@@ -208,18 +208,41 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
     fd_to_unlock = pager.get_fd();
 
     try {
-        // 1. Пытаемся заблокировать таблицу. Если не вышло — сразу выходим.
         if (!TableLockManager::lock_table(fd_to_unlock, true)) {
             return Result::Error(StatusCode::IO_ERROR, "Не удалось заблокировать таблицу для записи");
         }
 
         TableHeader header;
-        // 2. Читаем заголовок. throw_if_error отправит нас в catch при сбое I/O
         pager.read_page(0, &header).throw_if_error();
 
+        for (uint32_t i = 0; i < header.column_count; ++i) {
+
+            if (row[i].is_null && header.columns[i].is_not_null) {
+                TableLockManager::unlock_table(fd_to_unlock);
+                return Result::Error(StatusCode::NOT_NULL_VIOLATION, "Нарушение NOT NULL");
+            }
+
+            if (!row[i].is_null) {
+                bool is_col_int = (header.columns[i].type == static_cast<uint8_t>(DataType::INT));
+                bool is_val_int = (row[i].type == DataType::INT);
+                
+                if (is_col_int != is_val_int) {
+                    TableLockManager::unlock_table(fd_to_unlock);
+
+                    throw DbException(StatusCode::TYPE_MISMATCH, "Несоответствие типов данных"); 
+                }
+            }
+
+            if (header.columns[i].is_indexed && row[i].type == DataType::STR) {
+                if (row[i].str_val.size() >= TYPE_STR_SIZE) {
+                    TableLockManager::unlock_table(fd_to_unlock);
+                    return Result::Error(StatusCode::INVALID_VALUE, "Строка слишком велика для индекса");
+                }
+            }
+        }
+
         TablePageManager pm(pager, header);
-        
-        // 3. Проверка уникальности (INDEXED). Если ключ дублируется — выходим.
+
         Result checkRes = checkUniqueConstraints(pager, header, row, pm);
         if (!checkRes.isOk()) {
             TableLockManager::unlock_table(fd_to_unlock);
@@ -229,7 +252,6 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         std::vector<char> rec = RecordManager::serializeRowDynamic(row, header);
         uint16_t rec_size = static_cast<uint16_t>(rec.size());
 
-        // 4. Ищем место. Если места нет — ошибка.
         RecordID rid = findAvailableSlot(pager, header, rec_size);
         if (rid.page_id == 0) {
              throw DbException(StatusCode::OUT_OF_MEMORY, "В таблице нет свободного места");
@@ -238,17 +260,12 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
         alignas(PAGE_SIZE) char page_buffer[PAGE_SIZE];
         pager.read_page(rid.page_id, page_buffer).throw_if_error();
 
-        // 5. Записываем данные в страницу
         rid.slot_id = write_record_to_page(page_buffer, rec);
-        
-        // 6. СБРОС НА ДИСК. Проверяем, что запись физически прошла.
+
         pager.write_page(rid.page_id, page_buffer).throw_if_error();
-        
-        // 7. Обновляем заголовки (free_list и т.д.)
+
         pager.write_page(0, &header).throw_if_error();
 
-        // 8. Обновляем индексы. (ВАЖНО: В коде ниже я предполагаю, что мы поправили его на возврат Result)
-        // Если это все еще void, вызови его просто так, но лучше добавить проверку.
         updateIndices(pager, header, row, rid);
 
         TableLockManager::unlock_table(fd_to_unlock);
@@ -256,6 +273,7 @@ Result TableManager::insertRow(const std::string& full_path, const Row& row) {
 
     } catch (const DbException& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
+        if (e.code() == StatusCode::TYPE_MISMATCH) throw; 
         return Result::Error(e.code(), e.what());
     } catch (const std::exception& e) {
         if (fd_to_unlock != -1) TableLockManager::unlock_table(fd_to_unlock);
