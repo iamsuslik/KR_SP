@@ -30,7 +30,11 @@ constexpr int MAX_SESSIONS = 1024;
 constexpr int GUID_SIZE = 37;
 constexpr int TIME_SIZE = 26;
 
+constexpr int RID_SIZE = 8;
+
 #include "comparators.h"
+
+
 
 struct NodeControl {
     pid_t worker_pid;

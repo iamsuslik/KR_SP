@@ -595,18 +595,6 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
 {
     if (_root_id == 0) return Result::Error(StatusCode::NOT_FOUND, "Tree empty");
 
-    RecordID next_rid;
-    tkey next_key;
-    bool has_next = false;
-    Result next_res = upper_bound(key_del, next_rid);
-    if (next_res.isOk()) {
-        alignas(PAGE_SIZE) char tmp_buf[PAGE_SIZE];
-        _pager.read_page(next_rid.page_id, tmp_buf).throw_if_error();
-        auto* next_leaf = reinterpret_cast<bptree_node_term*>(tmp_buf);
-        next_key = next_leaf->_data[next_rid.slot_id].first;
-        has_next = true;
-    }
-
     std::vector<uint32_t> path;
     uint32_t leaf_id = find_path(key_del, path);
 
@@ -627,14 +615,11 @@ Result BP_tree<tkey, t, compare>::erase(const tkey& key_del)
     }
     leaf->_count--;
     _pager.write_page(leaf_id, buffer).throw_if_error();
+    
     if (is_node_underfull(leaf) && leaf_id != _root_id) {
         balance_delete(leaf_id, path);
     }
     shrink_root();
-    if (has_next) {
-        RecordID out_rid;
-        return find(next_key, out_rid);
-    }
     
     return Result::Success();
 }
