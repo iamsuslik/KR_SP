@@ -27,7 +27,7 @@ Result HierarchyManager::createDatabase(const std::string& db_name) {
                 return Result::Error(StatusCode::IO_ERROR, e.what());
             }
         }
-        if (n < 0) break;
+        // if (n < 0) break;
     }
 
     if (!created_any)
@@ -48,7 +48,7 @@ Result HierarchyManager::dropDatabase(const std::string& db_name) {
                 return Result::Error(StatusCode::IO_ERROR, e.what());
             }
         }
-        if (n < 0) break;
+        // if (n < 0) break;
     }
 
     if (!found) {

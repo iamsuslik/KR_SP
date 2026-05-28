@@ -288,7 +288,7 @@ void TableManager::applyAssignments(
                     BP_tree<int> index(pager, header.root_page_ids[colIdx], pm);
                     index.erase(row[colIdx].int_val).throw_if_error();
                     row[colIdx] = newValue;
-                    index.insert(newValue.int_val, rid);
+                    index.insert(newValue.int_val, rid).throw_if_error();
                 } else {
                     BP_tree<IndexKeyStr> index(pager, header.root_page_ids[colIdx], pm);
                     IndexKeyStr oldK{}, newK{};

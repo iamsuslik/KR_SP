@@ -64,7 +64,6 @@ private:
     std::unique_ptr<Statement> parseAuth();
     std::unique_ptr<Statement> parseAlter();
     std::unique_ptr<Statement> parseGet();
-    std::unique_ptr<Statement> parseRevert();
 
     std::unique_ptr<ASTNode> parseExpression();   // OR
     std::unique_ptr<ASTNode> parseAndExpr();      // AND

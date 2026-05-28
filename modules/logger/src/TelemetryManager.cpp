@@ -118,7 +118,7 @@ double TelemetryManager::getAvgDuration(int seconds) const {
 }
 
 void TelemetryManager::printMetrics() const {
-    std::shared_lock lock(mtx);
+    // std::shared_lock lock(mtx);
     
     std::cout << "\n" << std::string(REPORT_WIDTH, '=') << "\n"
               << "   DBMS REAL-TIME PERFORMANCE REPORT\n"

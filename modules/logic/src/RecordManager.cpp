@@ -140,18 +140,13 @@ void RecordManager::initColumnSchema(ColumnSchema& dest, const ColumnDef& src) {
     dest.has_default = src.has_default;
 
     if (src.has_default) {
-        if (src.type == DataType::INT) {
-            try {
-                int d_val = std::stoi(src.default_value);
-                std::memcpy(dest.default_val, &d_val, sizeof(int));
-            } catch (...) {
-                int zero = 0;
-                std::memcpy(dest.default_val, &zero, sizeof(int));
-            }
-        } else {
-            std::string d_val = src.default_value;
-            if (!d_val.empty() && d_val.front() == '"') d_val = d_val.substr(1, d_val.size() - 2);
-            std::strncpy(dest.default_val, d_val.c_str(), TYPE_STR_SIZE - 1);
+        std::string d_val = src.default_value;
+
+        if (d_val.size() >= 2 && d_val.front() == '"' && d_val.back() == '"') {
+            d_val = d_val.substr(1, d_val.size() - 2);
         }
+
+        std::strncpy(dest.default_val, d_val.c_str(), TYPE_STR_SIZE - 1);
+        dest.default_val[TYPE_STR_SIZE - 1] = '\0';
     }
 }

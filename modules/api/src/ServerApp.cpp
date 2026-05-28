@@ -94,7 +94,7 @@ static std::string extract_table_name(const std::string& query) {
         std::string guid(ctrl.task_guid);
         std::string db(ctrl.current_db);
 
-        if (!db.empty()) hm.useDatabase(db);
+        if (!db.empty()) hm.useDatabase(db).throw_if_error();
 
         SQLParser parser;
         std::string result_buf;
