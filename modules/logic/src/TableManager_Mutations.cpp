@@ -14,6 +14,10 @@ int g_current_node_id = -1;
 
 Result TableManager::createTable(const std::string& full_path,
                                   const TableSchema& schema) {
+    if (schema.columns.size() > MAX_COLUMNS) {
+        return Result::Error(StatusCode::INVALID_VALUE, 
+            "Ошибка: Таблица не может иметь более " + std::to_string(MAX_COLUMNS) + " колонок");
+    }
     try {
         Pager pager(full_path);
         TableHeader header;
