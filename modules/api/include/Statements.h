@@ -120,7 +120,7 @@ public:
             return auth; 
         }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (res.code == StatusCode::DATABASE_NOT_FOUND) {
             cb("[Error] " + res.details + "\n"); 
             return res;
@@ -151,7 +151,7 @@ public:
             return auth; 
         }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (!res.isOk()) { 
             cb("[Error] " + res.details + "\n"); 
             return res; 
@@ -180,7 +180,7 @@ public:
         auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
 
         TableHeader header;
@@ -263,7 +263,7 @@ public:
         auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        Result dst_res = hm.resolveTablePath(table_);
+        Result dst_res = hm.resolveTablePath(table_, g_current_node_id);
         if (!dst_res.isOk()) { cb("[Error] " + dst_res.details + "\n"); return dst_res; }
 
         TableHeader dst_header;
@@ -354,7 +354,7 @@ public:
         auto auth = requireAccess(fd, db_of(table_, fd), "READ", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
         return TableManager::executeSelect(res.path, where_.get(),
                                            cols_, aliases_, aggs_, cb);
@@ -375,7 +375,7 @@ public:
         auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
 
         Result r = TableManager::executeUpdate(res.path, where_.get(), asgn_);
@@ -396,7 +396,7 @@ public:
         auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        Result res = hm.resolveTablePath(table_);
+        Result res = hm.resolveTablePath(table_, g_current_node_id);
         if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
 
         Result r = TableManager::executeDelete(res.path, where_.get());

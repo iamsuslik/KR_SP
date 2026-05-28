@@ -227,4 +227,6 @@ struct WorkerContext {
 class AsyncManager;
 extern AsyncManager* g_async_manager;
 
+extern int g_current_node_id;
+
 #endif // COMMON_H

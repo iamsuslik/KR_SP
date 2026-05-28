@@ -6,7 +6,6 @@
 #include "Logger.h"
 #include "TableLockManager.h"
 #include "common.h"
-extern int g_current_node_id;
 
 #include <iostream>
 #include <vector>
