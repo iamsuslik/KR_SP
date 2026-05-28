@@ -174,7 +174,7 @@ struct ColumnSchema {
 
 struct TableHeader {
   uint32_t column_count;
-  uint32_t root_page_id;
+  uint32_t reserved_header_space;
   uint32_t free_count;
   uint32_t free_list[MAX_FREE_PAGES];
   uint32_t root_page_ids[MAX_COLUMNS];
@@ -209,7 +209,6 @@ struct SessionSlot {
   int client_fd;
   char session_token[MAX_TOKEN_LEN];
   char current_db[MAX_NAME_LEN];
-  // char current_user[MAX_NAME_LEN];
   bool is_active;
 };
 
