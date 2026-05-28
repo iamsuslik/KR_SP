@@ -144,6 +144,7 @@ int main() {
     signal(SIGCHLD, SIG_IGN);
 
     AsyncManager async;
+    g_async_manager = &async; 
     TelemetryManager telemetry;
     SharedMemoryLayout* layout = async.getLayout();
 

@@ -42,7 +42,6 @@ set(DB_CORE_SOURCES
     shared/src/ErrorUtils.cpp
     logger/src/Logger.cpp
     logger/src/TelemetryManager.cpp
-    storage/src/BPlusTree.cpp
 )
 
 add_library(db_logic STATIC ${DB_CORE_SOURCES})
