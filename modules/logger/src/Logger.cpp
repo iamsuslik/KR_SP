@@ -11,40 +11,40 @@ static std::mutex log_file_mtx;
 
 void Logger::log(const std::string& query, const std::string& status,
                  long long duration) {
-  std::lock_guard<std::mutex> lock(log_file_mtx);
+    std::lock_guard<std::mutex> lock(log_file_mtx);
 
-  namespace fs = std::filesystem;
-  const std::string log_dir = "logs";
-  const std::string log_file = log_dir + "/access.log";
+    namespace fs = std::filesystem;
+    const std::string log_dir = "logs";
+    const std::string log_file = log_dir + "/access.log";
 
-  try {
-    if (!fs::exists(log_dir)) {
-      fs::create_directories(log_dir);
-    }
+    try {
+        if (!fs::exists(log_dir)) {
+            fs::create_directories(log_dir);
+        }
 
-    std::ofstream out(log_file, std::ios::app);
-    if (!out.is_open()) return;
+        std::ofstream out(log_file, std::ios::app);
+        if (!out.is_open()) return;
 
-    // Потокобезопасное получение времени
-    auto now =
-        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    struct tm time_struct;
+        // Потокобезопасное получение времени
+        auto now = std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now());
+        struct tm time_struct;
 #ifdef _WIN32
-    localtime_s(&time_struct, &now);
+        localtime_s(&time_struct, &now);
 #else
-    localtime_r(&now, &time_struct);
+        localtime_r(&now, &time_struct);
 #endif
 
-    char time_str[20];
-    std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S",
-                  &time_struct);
+        char time_str[20];
+        std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S",
+                      &time_struct);
 
-    // Строгий формат записи
-    out << "[" << time_str << "] " << "[Status: " << status << "] "
-        << "[Latency: " << duration << "ms] " << "[Query: " << query << "]"
-        << std::endl;
+        // Строгий формат записи
+        out << "[" << time_str << "] " << "[Status: " << status << "] "
+            << "[Latency: " << duration << "ms] " << "[Query: " << query << "]"
+            << std::endl;
 
-  } catch (...) {
-    // Логгер не должен приводить к падению основной системы при ошибках ФС
-  }
+    } catch (...) {
+        // Логгер не должен приводить к падению основной системы при ошибках ФС
+    }
 }
