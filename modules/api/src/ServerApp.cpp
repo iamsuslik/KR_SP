@@ -89,27 +89,34 @@ static std::string extract_table_name(const std::string& query) {
             ::exit(EXIT_FAILURE);
         }
 
-        std::string query(ctrl.query_buffer);
+        std::string raw_msg(ctrl.query_buffer);
         std::string guid(ctrl.task_guid);
-        std::string db(ctrl.current_db);
 
-        if (!db.empty()) hm.useDatabase(db).throw_if_error();
+        size_t delim = raw_msg.find("@@@");
+        std::string token = "";
+        std::string query = raw_msg;
+        if (delim != std::string::npos) {
+            token = raw_msg.substr(0, delim);
+            query = raw_msg.substr(delim + 3);
+        }
+
+        std::string db = async.get_session_db(token);
+        if (!db.empty()) hm.useDatabase(db);
 
         SQLParser parser;
         std::string result_buf;
         auto output_cb = [&](const std::string& s) { result_buf += s; };
 
         auto t0 = std::chrono::high_resolution_clock::now();
-        Result res = parser.process(query, hm, -1 /*нет сокета*/, output_cb);
+        Result res = parser.process(query, hm, token, output_cb);
         auto t1 = std::chrono::high_resolution_clock::now();
         long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
         async.update_task(guid, AsyncStatus::COMPLETED, res.code, result_buf);
 
         std::string new_db = hm.getCurrentDB();
-        if (!new_db.empty() && new_db != db) {
-            std::strncpy(ctrl.current_db, new_db.c_str(), MAX_NAME_LEN - 1);
-            ctrl.current_db[MAX_NAME_LEN - 1] = '\0';
+        if (!new_db.empty() && !token.empty()) {
+            async.set_session_db(token, new_db);
         }
 
         Logger::log(query, res.isOk() ? "SUCCESS" : "ERROR", ms);
@@ -218,26 +225,23 @@ int main() {
             }
 
             int cfd = fds[i].fd;
-            auto query = NetworkManager::receiveString(cfd);
+            auto raw_message = NetworkManager::receiveString(cfd);
 
-            if (query.empty()) {
-                async.close_session(cfd);
+            if (raw_message.empty()) {
                 close(cfd);
                 fds.erase(fds.begin() + static_cast<long>(i));
                 --i;
                 continue;
             }
 
-            if (query.compare(0, CMD_CHECK_LEN, CMD_CHECK) == 0) {
-                std::string guid = query.substr(CMD_CHECK_LEN);
+            if (raw_message.compare(0, CMD_CHECK_LEN, CMD_CHECK) == 0) {
+                std::string guid = raw_message.substr(CMD_CHECK_LEN);
                 if (!guid.empty() && guid.back() == ';') guid.pop_back();
 
                 AsyncResult res = async.fetch_result(guid);
-                std::string resp =
-                    (res.status == AsyncStatus::PENDING ||
-                     res.status == AsyncStatus::PROCESSING)
-                    ? "Processing..."
-                    : res.data;
+                std::string resp = (res.status == AsyncStatus::PENDING || res.status == AsyncStatus::PROCESSING)
+                                   ? "Processing..."
+                                   : res.data;
                 NetworkManager::sendString(cfd, resp);
                 close(cfd);
                 fds.erase(fds.begin() + static_cast<long>(i));
@@ -246,7 +250,12 @@ int main() {
             }
 
             std::string guid = async.register_task();
-            std::string current_db = async.get_session_db(cfd);
+
+            size_t delim = raw_message.find("@@@");
+            std::string query = raw_message;
+            if (delim != std::string::npos) {
+                query = raw_message.substr(delim + 3);
+            }
 
             std::string table_name = extract_table_name(query);
             int target_node = shard_node(table_name);
@@ -258,14 +267,11 @@ int main() {
                 break;
             }
 
-            std::strncpy(ctrl.query_buffer, query.c_str(), NODE_QUERY_BUFFER - 1);
+            std::strncpy(ctrl.query_buffer, raw_message.c_str(), NODE_QUERY_BUFFER - 1);
             ctrl.query_buffer[NODE_QUERY_BUFFER - 1] = '\0';
 
             std::strncpy(ctrl.task_guid, guid.c_str(), 36);
             ctrl.task_guid[36] = '\0';
-
-            std::strncpy(ctrl.current_db, current_db.c_str(), MAX_NAME_LEN - 1);
-            ctrl.current_db[MAX_NAME_LEN - 1] = '\0';
 
             ctrl.is_busy = true;
             ctrl.last_seen = now_sec();

@@ -39,7 +39,8 @@ void runQueryEngine(std::istream& input, HierarchyManager& hm, SQLParser& parser
                 std::cout << msg << std::flush;
             };
 
-            Result res = parser.process(query, hm, -1, print_to_screen);
+            // Исправлено: передаем пустую строку "" вместо -1
+            Result res = parser.process(query, hm, "", print_to_screen);
 
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
