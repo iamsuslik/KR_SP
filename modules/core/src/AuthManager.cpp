@@ -201,7 +201,7 @@ bool AuthManager::authenticate(const std::string& username,
     auto cb = [&](const std::string& chunk) { raw_output += chunk; };
  
     TableManager::executeSelect(
-        path_res.path, cond.get(), {"pass_hash", "salt"}, {}, {}, cb);
+        path_res.path, cond.get(), {"pass_hash", "salt"}, {}, {}, cb).throw_if_error();
 
     auto rows = parseSelectOutput(raw_output);
     if (rows.empty()) return false;
@@ -232,7 +232,7 @@ bool AuthManager::checkAccess(const std::string& username,
                           std::unique_ptr<ASTNode> cond) -> bool {
         std::string raw;
         auto cb = [&](const std::string& s) { raw += s; };
-        TableManager::executeSelect(path, cond.get(), {}, {}, {}, cb);
+        TableManager::executeSelect(path, cond.get(), {}, {}, {}, cb).throw_if_error();
         return !parseSelectOutput(raw).empty();
     };
 
@@ -259,7 +259,7 @@ bool AuthManager::checkAccess(const std::string& username,
         std::string raw;
         auto cb = [&](const std::string& s) { raw += s; };
         auto gc = std::make_unique<ComparisonNode>("username", "==", Value(username));
-        TableManager::executeSelect(ug_path.path, gc.get(), {"group_name"}, {}, {}, cb);
+        TableManager::executeSelect(ug_path.path, gc.get(), {"group_name"}, {}, {}, cb).throw_if_error();
  
         for (const auto& row : parseSelectOutput(raw)) {
             if (row.contains("group_name") && row["group_name"].is_string())
