@@ -19,6 +19,7 @@ constexpr const int MAX_FREE_PAGES = 100;
 constexpr const int MAX_NAME_LEN = 32;
 constexpr const int TYPE_STR_SIZE = 256; 
 constexpr const int TYPE_INT_SIZE = 4;
+constexpr int MAX_TOKEN_LEN = 256;
 
 constexpr int N_NODES = 4;
 
@@ -193,8 +194,9 @@ struct SharedTaskSlot {
 
 struct SessionSlot {
     int client_fd;
+    char session_token[MAX_TOKEN_LEN];
     char current_db[MAX_NAME_LEN];
-    char current_user[MAX_NAME_LEN];
+    // char current_user[MAX_NAME_LEN];
     bool is_active;
 };
 

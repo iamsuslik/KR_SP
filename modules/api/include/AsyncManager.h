@@ -21,19 +21,17 @@ public:
     AsyncResult fetch_result(const std::string& guid);
 
 
-    void close_session(int fd);
+    void close_session(const std::string& token);
 
     int find_idle_node() const;
 
     SharedMemoryLayout* getLayout() const;
-// Найти в AsyncManager.h секцию сессий и вставить ПОД close_session:
-    void set_session_db(int fd, const std::string& db_name);
-    std::string get_session_db(int fd);
 
+    void set_session_db(const std::string& token, const std::string& db_name);
+    std::string get_session_db(const std::string& token);
 
-    // === ВСТАВИТЬ СЮДА ===
-    void set_session_user(int fd, const std::string& username);
-    std::string get_session_user(int fd);
+    // void set_session_user(int fd, const std::string& username);
+    // std::string get_session_user(int fd);
 
 private:
     SharedMemoryLayout* layout_ = nullptr;

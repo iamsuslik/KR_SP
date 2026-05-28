@@ -1,4 +1,5 @@
 #include "NetworkManager.h"
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -8,21 +9,20 @@
 #include <thread>
 #include <chrono>
 
-// --- КОНСТАНТЫ ИНТЕРФЕЙСА (UI) ---
+using json = nlohmann::json;
+
 #define CLR_RST  "\033[0m"
 #define CLR_ERR  "\033[31m"
 #define CLR_INF  "\033[34m"
 #define CLR_SQL  "\033[32m"
 #define CLR_WRN  "\033[33m"
 
-// --- СИСТЕМНЫЕ НАСТРОЙКИ ---
 namespace Config {
     const char* SERVER_IP = "127.0.0.1";
-    constexpr int POLL_INTERVAL_MS = 500;      // Частота опроса сервера
-    constexpr int CLEANUP_WIDTH = 60;          // Ширина строки для очистки спиннера
+    constexpr int POLL_INTERVAL_MS = 500;
+    constexpr int CLEANUP_WIDTH = 60;
 }
 
-// --- ПРОТОКОЛ ОБМЕНА ---
 namespace Protocol {
     const std::string ASYNC_PREFIX = "ASYNC_ID: ";
     const std::string STATUS_PENDING = "Processing...";
@@ -33,9 +33,8 @@ namespace Protocol {
 volatile sig_atomic_t shutdown_flag = 0;
 void handle_sigint(int) { shutdown_flag = 1; }
 
-/**
- * Хелпер для установки соединения
- */
+std::string g_session_token = "";
+
 int connectToServer() {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
@@ -61,9 +60,6 @@ bool isQueryComplete(const std::string& buffer) {
     return false;
 }
 
-/**
- * Цикл опроса сервера для получения результата по GUID
- */
 void pollForResult(const std::string& guid) {
     std::cout << CLR_INF << "[Async] Task submitted. Waiting for result... " << CLR_RST << std::flush;
     
@@ -82,6 +78,13 @@ void pollForResult(const std::string& guid) {
         close(poll_sock);
 
         if (response != Protocol::STATUS_PENDING) {
+            try {
+                auto j = json::parse(response);
+                if (j.contains("token")) {
+                    g_session_token = j["token"].get<std::string>();
+                }
+            } catch (...) {}
+
             std::cout << "\r" << std::string(Config::CLEANUP_WIDTH, ' ') << "\r"; 
             std::cout << CLR_INF << "[Result from " << guid << "]:" << CLR_RST << std::endl;
             std::cout << response << std::endl;
@@ -93,9 +96,6 @@ void pollForResult(const std::string& guid) {
     }
 }
 
-/**
- * Отправка запроса и первичная обработка
- */
 void processExchange(const std::string& query) {
     if (query.empty()) return;
 
@@ -105,16 +105,21 @@ void processExchange(const std::string& query) {
         return;
     }
 
-    NetworkManager::sendString(sock, query);
+    std::string payload = g_session_token + "@@@" + query;
+    NetworkManager::sendString(sock, payload);
     std::string first_resp = NetworkManager::receiveString(sock);
     close(sock);
 
-    // Сравниваем начало ответа с префиксом асинхронности
     if (first_resp.compare(0, Protocol::ASYNC_PREFIX.length(), Protocol::ASYNC_PREFIX) == 0) {
         std::string guid = first_resp.substr(Protocol::ASYNC_PREFIX.length());
         pollForResult(guid);
     } else {
-        // Если сервер сразу прислал результат или ошибку
+        try {
+            auto j = json::parse(first_resp);
+            if (j.contains("token")) {
+                g_session_token = j["token"].get<std::string>();
+            }
+        } catch (...) {}
         std::cout << first_resp << std::endl;
     }
 }
@@ -161,7 +166,6 @@ void runBatch(const std::string& path) {
 int main(int argc, char* argv[]) {
     signal(SIGINT, handle_sigint);
 
-    // Проверка связи при запуске
     int test_sock = connectToServer();
     if (test_sock < 0) {
         std::cerr << CLR_ERR << "Fatal: Cannot connect to DBMS Server at " << Config::SERVER_IP << CLR_RST << std::endl;
