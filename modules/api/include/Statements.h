@@ -494,7 +494,7 @@ public:
         auto auth = requireAccess(token, "_system", "ADMIN", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto res = hm.resolveTablePath("_system.users", g_current_node_id);
+        auto res = hm.resolveTablePath("_system.users");
         if (!res.isOk()) {
             cb("[Error] Системная БД не инициализирована.\n"); return res;
         }
@@ -522,7 +522,7 @@ public:
         auto auth = requireAccess(token, "_system", "ADMIN", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto res = hm.resolveTablePath("_system.groups", g_current_node_id);
+        auto res = hm.resolveTablePath("_system.groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
         Row row; row.push_back(Value(group_)); row.push_back(Value(db_));
@@ -542,7 +542,7 @@ public:
         auto auth = requireAccess(token, "_system", "ADMIN", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto res = hm.resolveTablePath("_system.user_groups", g_current_node_id);
+        auto res = hm.resolveTablePath("_system.user_groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
         Row row;
@@ -570,7 +570,7 @@ public:
         auto auth = requireAccess(token, "_system", "ADMIN", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto res = hm.resolveTablePath("_system.permissions", g_current_node_id);
+        auto res = hm.resolveTablePath("_system.permissions");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
         for (const auto& act : actions_) {
@@ -605,7 +605,7 @@ public:
         auto auth = requireAccess(token, "_system", "ADMIN", hm);
         if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto res = hm.resolveTablePath("_system.permissions", g_current_node_id);
+        auto res = hm.resolveTablePath("_system.permissions");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
         for (const auto& act : actions_) {

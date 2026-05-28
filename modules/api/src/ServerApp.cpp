@@ -102,7 +102,7 @@ static std::string extract_table_name(const std::string& query) {
         }
 
         std::string db = async.get_session_db(token);
-        if (!db.empty()) hm.useDatabase(db);
+        if (!db.empty()) hm.useDatabase(db).throw_if_error();
 
         SQLParser parser;
         std::string result_buf;
