@@ -27,6 +27,7 @@ template<typename T>
 consteval std::size_t get_optimal_t() {
     constexpr std::size_t overhead = MAX_COLUMNS;
     constexpr std::size_t pair_size = sizeof(T) + RID_SIZE;
+
     constexpr std::size_t max_keys = (PAGE_SIZE - overhead) / (2 * pair_size);
     return (max_keys > 2) ? max_keys : 2;
 }

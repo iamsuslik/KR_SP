@@ -7,231 +7,65 @@
 #include "TableManager.h"
 #include "AsyncManager.h"
 #include "AuthManager.h"
-#include <fstream>
-#include <sstream>
+#include "Pager.h"
+#include <nlohmann/json.hpp>
+#include <map>
+#include <memory>
+#include <vector>
+#include <functional>
+#include <string>
+#include <cstring>
+
+using json = nlohmann::json;
+
+#ifndef OUTPUT_CALLBACK_DEFINED
+#define OUTPUT_CALLBACK_DEFINED
+using OutputCallback = std::function<void(const std::string&)>;
+#endif
 
 class Statement {
 protected:
-
-    Result requireAccess(int client_fd, const std::string& db, const std::string& action, HierarchyManager& hm) {
+    Result requireAccess(int client_fd, const std::string& resource,
+                          const std::string& action, HierarchyManager& hm) {
         if (!g_async_manager) return Result::Success();
 
-        std::string current_user = g_async_manager->get_session_user(client_fd);
-        if (current_user.empty()) return Result::Error(StatusCode::AUTH_FAILED, "Необходима авторизация (AUTH)");
-
-        if (!AuthManager::checkAccess(current_user, db, action, hm)) {
-            return Result::Error(StatusCode::PERMISSION_DENIED, "Отказ в доступе: требуется право " + action + " для " + db);
+        std::string user = g_async_manager->get_session_user(client_fd);
+        if (user.empty()){
+            return Result::Error(StatusCode::AUTH_FAILED,"Необходима авторизация (AUTH LOGIN ... PASSWORD ...)");
+        }
+        if (!AuthManager::checkAccess(user, resource, action, hm)){
+            return Result::Error(StatusCode::PERMISSION_DENIED,"Отказ в доступе: требуется право '" + action +"' для '" + resource + "'");
         }
         return Result::Success();
+    }
+
+    static std::string db_of(const std::string& table, int fd) {
+        auto dot = table.find('.');
+        if (dot != std::string::npos) return table.substr(0, dot);
+        if (g_async_manager) return g_async_manager->get_session_db(fd);
+        return "";
     }
 
 public:
     virtual ~Statement() = default;
-    virtual Result execute(HierarchyManager&hm,
+    virtual Result execute(HierarchyManager& hm,
                            int client_fd,
-                           SQLParser::OutputCallback cb) = 0;
-};
-
-class SelectStatement : public Statement {
-    std::string table_;
-    std::vector<std::string> cols_;
-    std::unique_ptr<ASTNode> where_;
-    std::vector<AggregateRequest> aggs_;
-    std::map<std::string, std::string> aliases_;
-
-public:
-    SelectStatement(std::string t,
-                    std::vector<std::string> c,
-                    std::unique_ptr<ASTNode> w,
-                    std::vector<AggregateRequest>a  = {},
-                    std::map<std::string, std::string> al = {})
-        : table_(std::move(t)), cols_(std::move(c)), where_(std::move(w)),
-          aggs_(std::move(a)), aliases_(std::move(al)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        std::string db_part = table_;
-        auto dot = table_.find('.');
-        if (dot != std::string::npos) db_part = table_.substr(0, dot);
-        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
-        auto auth = requireAccess(fd, db_part, "READ", hm);
-        if (!auth.isOk()) return auth;
-
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
-        return TableManager::executeSelect(
-            res.path, where_.get(), cols_, aliases_, aggs_, cb);
-    }
-};
-
-class InsertStatement : public Statement {
-    std::string table_;
-    std::vector<std::string> targetCols_;
-    std::vector<std::string> rawValues_;
-
-public:
-    InsertStatement(std::string t,
-                    std::vector<std::string> c,
-                    std::vector<std::string> v)
-        : table_(std::move(t)), targetCols_(std::move(c)), rawValues_(std::move(v)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-
-        std::string db_part = table_;
-        auto dot = table_.find('.');
-        if (dot != std::string::npos) {
-            db_part = table_.substr(0, dot);
-        } else if (g_async_manager) {
-            db_part = g_async_manager->get_session_db(fd);
-        }
-
-        auto auth = requireAccess(fd, db_part, "WRITE", hm);
-        if (!auth.isOk()) return auth;
-
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
-
-        TableHeader header;
-
-        Result readRes = Pager(res.path).read_page(0, &header);
-        if (!readRes.isOk()) return readRes;
-
-        Row finalRow(header.column_count, Value());
-        SQLParser parser;
-
-        if (parser.prepareAndValidateRow(finalRow, header, targetCols_, rawValues_, cb)) {
-            Result insRes = TableManager::insertRow(res.path, finalRow);
-            if (insRes.isOk()) cb("[Success] 1 row inserted.\n");
-            return insRes;
-        }
-
-        return Result::Error(StatusCode::INVALID_VALUE, "Ошибка валидации строки при вставке");
-    }
-};
-
-class InsertSelectStatement : public Statement {
-    std::string table_;
-    std::vector<std::string> targetCols_;
-    std::unique_ptr<Statement> selectQuery_;
-
-public:
-    InsertSelectStatement(std::string t, std::vector<std::string> c, std::unique_ptr<Statement> s)
-        : table_(std::move(t)), targetCols_(std::move(c)), selectQuery_(std::move(s)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        auto authRes = requireAccess(fd, table_, "WRITE", hm);
-        if (!authRes.isOk()) return authRes;
-
-        auto dstRes = hm.resolveTablePath(table_);
-        if (!dstRes.isOk()) return dstRes;
-
-        TableHeader dstHeader;
-        Pager(dstRes.path).read_page(0, &dstHeader).throw_if_error();
-
-        int inserted_count = 0;
-
-        auto intercept_cb = [&](const std::string& row_json) {
-            if (row_json == "[\n" || row_json == "\n]\n" || row_json == "[]\n") return;
-
-            Row newRow(dstHeader.column_count, Value());
-            SQLParser parser;
-
-            std::vector<std::string> extracted_vals;
-            for (uint32_t i = 0; i < dstHeader.column_count; ++i) {
-                std::string key = "\"" + std::string(dstHeader.columns[i].name) + "\": ";
-                size_t pos = row_json.find(key);
-                if (pos != std::string::npos) {
-                    pos += key.length();
-                    size_t end = row_json.find_first_of(",}", pos);
-                    std::string val = row_json.substr(pos, end - pos);
-                    if (!val.empty() && val.front() == '"') val = val.substr(1, val.length() - 2);
-                    extracted_vals.push_back(val);
-                }
-            }
-
-            if (parser.prepareAndValidateRow(newRow, dstHeader, targetCols_, extracted_vals, cb)) {
-                if (TableManager::insertRow(dstRes.path, newRow).isOk()) inserted_count++;
-            }
-        };
-
-        Result selRes = selectQuery_->execute(hm, fd, intercept_cb);
-        if (!selRes.isOk()) return selRes;
-
-        cb("[Success] Успешно скопировано " + std::to_string(inserted_count) + " строк.\n");
-        return Result::Success();
-    }
-};
-
-class UpdateStatement : public Statement {
-    std::string table_;
-    std::vector<std::pair<std::string, Value>> assignments_;
-    std::unique_ptr<ASTNode> where_;
-
-public:
-    UpdateStatement(std::string t,
-                    std::vector<std::pair<std::string, Value>> a,
-                    std::unique_ptr<ASTNode>  w)
-        : table_(std::move(t)), assignments_(std::move(a)), where_(std::move(w)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        std::string db_part = table_;
-        auto dot = table_.find('.');
-        if (dot != std::string::npos) db_part = table_.substr(0, dot);
-        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
-
-        auto auth = requireAccess(fd, db_part, "WRITE", hm);
-        if (!auth.isOk()) return auth;
-
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
-
-        auto r = TableManager::executeUpdate(res.path, where_.get(), assignments_);
-        if (r.isOk()) cb(r.details + "\n");
-        return r;
-    }
-};
-
-class DeleteStatement : public Statement {
-    std::string table_;
-    std::unique_ptr<ASTNode> where_;
-
-public:
-    DeleteStatement(std::string t,
-                    std::unique_ptr<ASTNode> w)
-        : table_(std::move(t)), where_(std::move(w)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        std::string db_part = table_;
-        auto dot = table_.find('.');
-        if (dot != std::string::npos) db_part = table_.substr(0, dot);
-        else if (g_async_manager) db_part = g_async_manager->get_session_db(fd);
-
-        auto auth = requireAccess(fd, db_part, "WRITE", hm);
-        if (!auth.isOk()) return auth;
-
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
-
-        auto r = TableManager::executeDelete(res.path, where_.get());
-        if (r.isOk()) cb(r.details + "\n");
-        return r;
-    }
+                           OutputCallback cb) = 0;
 };
 
 class UseStatement : public Statement {
     std::string db_;
-
 public:
     explicit UseStatement(std::string d) : db_(std::move(d)) {}
 
-    Result execute(HierarchyManager& hm, int client_fd,
-                   SQLParser::OutputCallback cb) override {
-        Result res = hm.useDatabase(db_);
-        if (res.isOk()) {
-            if (g_async_manager)
-                g_async_manager->set_session_db(client_fd, db_);
-            cb(res.details + "\n");
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        Result r = hm.useDatabase(db_);
+        if (r.isOk()){ 
+            cb("[Success] " + r.details + "\n");
+        }else{
+            cb("[Error] "   + r.details + "\n");
         }
-        return res;
+        return r;
     }
 };
 
@@ -239,9 +73,18 @@ class CreateDbStatement : public Statement {
     std::string name_;
 public:
     explicit CreateDbStatement(std::string n) : name_(std::move(n)) {}
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
-        auto r = hm.createDatabase(name_);
-        if (r.isOk()) cb(r.details + "\n");
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, name_, "CREATE", hm);
+        if (!auth.isOk()) { 
+            cb("[Error] " + auth.details + "\n"); 
+            return auth; 
+        }
+        Result r = hm.createDatabase(name_);
+        if (r.isOk()){ 
+            cb("[Success] " + r.details + "\n");
+        }else{
+            cb("[Error] " + r.details + "\n");
+        }
         return r;
     }
 };
@@ -250,30 +93,48 @@ class DropDbStatement : public Statement {
     std::string name_;
 public:
     explicit DropDbStatement(std::string n) : name_(std::move(n)) {}
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
-        auto r = hm.dropDatabase(name_);
-        if (r.isOk()) cb(r.details + "\n");
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, name_, "DROP", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+        Result r = hm.dropDatabase(name_);
+        if (r.isOk()){ 
+            cb("[Success] " + r.details + "\n");
+        }else{
+            cb("[Error] " + r.details + "\n");
+        }
         return r;
     }
 };
 
 class CreateTableStatement : public Statement {
-    std::string             table_;
-    std::vector<ColumnDef>  columns_;
+    std::string            table_;
+    std::vector<ColumnDef> cols_;
 public:
     CreateTableStatement(std::string t, std::vector<ColumnDef> c)
-        : table_(std::move(t)), columns_(std::move(c)) {}
+        : table_(std::move(t)), cols_(std::move(c)) {}
 
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
-        auto res = hm.resolveTablePath(table_);
-        if (res.code == StatusCode::OK)
-            return Result::Error(StatusCode::ALREADY_EXISTS,
-                                 "Таблица '" + table_ + "' уже существует");
-        if (res.code != StatusCode::NOT_FOUND)
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "CREATE", hm);
+        if (!auth.isOk()) { 
+            cb("[Error] " + auth.details + "\n"); 
+            return auth; 
+        }
+
+        Result res = hm.resolveTablePath(table_);
+        if (res.code == StatusCode::DATABASE_NOT_FOUND) {
+            cb("[Error] " + res.details + "\n"); 
             return res;
-
-        auto r = TableManager::createTable(res.path, TableSchema(table_, columns_));
-        if (r.isOk()) cb("Таблица '" + table_ + "' создана.\n");
+        }
+        if (res.isOk()) {
+            cb("[Error] Таблица '" + table_ + "' уже существует.\n");
+            return Result::Error(StatusCode::ALREADY_EXISTS, "Table already exists");
+        }
+        Result r = TableManager::createTable(res.path, TableSchema(table_, cols_));
+        if (r.isOk()){ 
+            cb("[Success] Таблица '" + table_ + "' создана.\n");
+        }else{
+            cb("[Error] " + r.details + "\n");
+        }
         return r;
     }
 };
@@ -282,106 +143,359 @@ class DropTableStatement : public Statement {
     std::string table_;
 public:
     explicit DropTableStatement(std::string t) : table_(std::move(t)) {}
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
-        auto res = hm.resolveTablePath(table_);
-        if (!res.isOk()) return res;
-        auto r = TableManager::dropTable(res.path);
-        if (r.isOk()) cb("Таблица '" + table_ + "' удалена.\n");
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "DROP", hm);
+        if (!auth.isOk()) { 
+            cb("[Error] " + auth.details + "\n"); 
+            return auth; 
+        }
+
+        Result res = hm.resolveTablePath(table_);
+        if (!res.isOk()) { 
+            cb("[Error] " + res.details + "\n"); 
+            return res; 
+        }
+        Result r = TableManager::dropTable(res.path);
+        if (r.isOk()) cb("[Success] Таблица '" + table_ + "' удалена.\n");
+        else          cb("[Error] " + r.details + "\n");
         return r;
     }
 };
 
+class InsertStatement : public Statement {
+    std::string              table_;
+    std::vector<std::string> target_cols_;
+    std::vector<std::string> rawValues_;
 
-// class RevertStatement : public Statement {
-//     std::string table_;
-//     std::string timestamp_;
-// public:
-//     RevertStatement(std::string t, std::string ts) : table_(std::move(t)), timestamp_(std::move(ts)) {}
-
-//     Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-//         auto authRes = requireAccess(fd, table_, "ADMIN", hm);
-//         if (!authRes.isOk()) return authRes;
-
-//         auto res = hm.resolveTablePath(table_);
-//         if (!res.isOk()) return res;
-
-//         std::string undo_path = res.path + ".undo";
-//         std::ifstream undo_file(undo_path, std::ios::binary);
-        
-//         if (!undo_file.is_open()) {
-//             return Result::Error(StatusCode::NOT_FOUND, "Файл undo-лога для таблицы не найден. Откат невозможен.");
-//         }
-        
-//         cb("[Temporal] Сканирование файла " + undo_path + "...\n");
-//         cb("[Temporal] Поиск транзакций после " + timestamp_ + "...\n");
-//         cb("[Temporal] Откат операций завершен успешно. Таблица восстановлена к состоянию на " + timestamp_ + ".\n");
-        
-//         return Result::Success();
-//     }
-// };
-
-class GetTaskStatusStatement : public Statement {
-    std::string guid_;
 public:
-    explicit GetTaskStatusStatement(std::string id) : guid_(std::move(id)) {}
+    InsertStatement(std::string t,
+                    std::vector<std::string> tc,
+                    std::vector<std::string> v) 
+        : table_(std::move(t)), 
+          target_cols_(std::move(tc)), 
+          rawValues_(std::move(v)) {} 
 
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        if (!g_async_manager)
-            return Result::Error(StatusCode::INTERNAL_ERROR, "AsyncManager недоступен");
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
-        auto r = g_async_manager->fetch_result(guid_);
-        switch (r.status) {
-            case AsyncStatus::PENDING:
-            case AsyncStatus::PROCESSING:
-                cb("Processing...\n");
-                return Result::Success();
-            case AsyncStatus::COMPLETED:
-                cb(r.data + "\n");
-                return {r.db_code, r.data};
-            case AsyncStatus::FAILED:
-                cb("[Ошибка асинхронной задачи] " + r.data + "\n");
-                return Result::Error(r.db_code, r.data);
+        Result res = hm.resolveTablePath(table_);
+        if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
+
+        TableHeader header;
+        try { 
+            Pager(res.path).read_page(0, &header).throw_if_error(); 
         }
-        return Result::Error(StatusCode::INTERNAL_ERROR, "Неизвестный статус задачи");
+        catch (const DbException& e) {
+            cb("[Error] " + std::string(e.what()) + "\n");
+            return Result::Error(e.code(), e.what());
+        }
+
+        Row row(header.column_count, Value());
+
+        if (!target_cols_.empty()) {
+            for (size_t i = 0; i < target_cols_.size() && i < rawValues_.size(); ++i) {
+                int ci = find_col(header, target_cols_[i]);
+                if (ci == -1) {
+                    cb("[Error] Колонка '" + target_cols_[i] + "' не найдена.\n");
+                    return Result::Error(StatusCode::COLUMN_NOT_FOUND, "Column not found");
+                }
+                row[ci] = SQLParser::parseLiteral(rawValues_[i]); 
+            }
+        } else {
+            if (rawValues_.size() != header.column_count) {
+                cb("[Error] Несоответствие числа столбцов. Ожидалось "
+                   + std::to_string(header.column_count) + ".\n");
+                return Result::Error(StatusCode::INVALID_VALUE, "Column count mismatch");
+            }
+            for (size_t i = 0; i < rawValues_.size(); ++i) {
+                row[i] = SQLParser::parseLiteral(rawValues_[i]);
+            }
+        }
+
+        if (!apply_constraints(row, header, cb))
+            return Result::Error(StatusCode::NOT_NULL_VIOLATION, "Constraint violation");
+
+        Result ins = TableManager::insertRow(res.path, row);
+        if (ins.isOk()){ 
+            cb("[Success] " + ins.details + "\n");
+        } else {
+            cb("[Error] " + ins.details + "\n");
+        }
+        return ins;
+    }
+
+private:
+    static int find_col(const TableHeader& h, const std::string& name) {
+        for (uint32_t i = 0; i < h.column_count; ++i)
+            if (std::string(h.columns[i].name) == name) return static_cast<int>(i);
+        return -1;
+    }
+
+    static bool apply_constraints(Row& row, const TableHeader& h, OutputCallback cb) {
+        for (uint32_t i = 0; i < h.column_count; ++i) {
+            if (!row[i].is_null) continue;
+            if (h.columns[i].has_default) {
+                row[i] = SQLParser::parseLiteral(h.columns[i].default_val);
+            } else if (h.columns[i].is_not_null) {
+                cb("[Error] Колонка '" + std::string(h.columns[i].name) + "' NOT_NULL.\n");
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+class InsertSelectStatement : public Statement {
+    std::string                table_;
+    std::vector<std::string>   target_cols_;
+    std::unique_ptr<Statement> select_query_;
+
+public:
+    InsertSelectStatement(std::string t,
+                          std::vector<std::string> c,
+                          std::unique_ptr<Statement> s)
+        : table_(std::move(t)), target_cols_(std::move(c)),
+          select_query_(std::move(s)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        Result dst_res = hm.resolveTablePath(table_);
+        if (!dst_res.isOk()) { cb("[Error] " + dst_res.details + "\n"); return dst_res; }
+
+        TableHeader dst_header;
+        try { Pager(dst_res.path).read_page(0, &dst_header).throw_if_error(); }
+        catch (const DbException& e) {
+            cb("[Error] " + std::string(e.what()) + "\n");
+            return Result::Error(e.code(), e.what());
+        }
+
+        int inserted_count = 0;
+
+        std::string select_buf;
+        auto intercept_cb = [&](const std::string& chunk) { select_buf += chunk; };
+
+        Result sel_res = select_query_->execute(hm, fd, intercept_cb);
+        if (!sel_res.isOk()) { cb("[Error] " + sel_res.details + "\n"); return sel_res; }
+
+        std::vector<json> src_rows;
+        try {
+            json arr = json::parse(select_buf);
+            if (arr.is_array())
+                for (const auto& item : arr)
+                    if (item.is_object()) src_rows.push_back(item);
+        } catch (...) {
+            cb("[Error] Не удалось разобрать результат SELECT.\n");
+            return Result::Error(StatusCode::INTERNAL_ERROR, "SELECT output parse failed");
+        }
+
+        for (const auto& src_row : src_rows) {
+            Row new_row(dst_header.column_count, Value());
+            bool ok = true;
+
+            if (!target_cols_.empty()) {
+                for (size_t i = 0; i < target_cols_.size(); ++i) {
+                    if (!src_row.contains(target_cols_[i])) continue;
+                    int ci = find_col(dst_header, target_cols_[i]);
+                    if (ci == -1) { ok = false; break; }
+                    new_row[ci] = json_to_value(src_row[target_cols_[i]]);
+                }
+            } else {
+                for (uint32_t i = 0; i < dst_header.column_count; ++i) {
+                    std::string col_name(dst_header.columns[i].name);
+                    if (src_row.contains(col_name))
+                        new_row[i] = json_to_value(src_row[col_name]);
+                }
+            }
+
+            if (!ok) continue;
+            if (TableManager::insertRow(dst_res.path, new_row).isOk()) ++inserted_count;
+        }
+
+        cb("[Success] Скопировано " + std::to_string(inserted_count) + " строк.\n");
+        return Result::Success();
+    }
+
+private:
+    static int find_col(const TableHeader& h, const std::string& name) {
+        for (uint32_t i = 0; i < h.column_count; ++i)
+            if (std::string(h.columns[i].name) == name) return static_cast<int>(i);
+        return -1;
+    }
+
+    static Value json_to_value(const json& j) {
+        if (j.is_null())    return Value();
+        if (j.is_number_integer()) return Value(j.get<int>());
+        if (j.is_string())  return Value(j.get<std::string>());
+        if (j.is_number())  return Value(static_cast<int>(j.get<double>()));
+        return Value(j.dump());
+    }
+};
+
+class SelectStatement : public Statement {
+    std::string                        table_;
+    std::vector<std::string>           cols_;
+    std::unique_ptr<ASTNode>           where_;
+    std::vector<AggregateRequest>      aggs_;
+    std::map<std::string,std::string>  aliases_;
+public:
+    SelectStatement(std::string t, 
+                    std::vector<std::string> c, 
+                    std::unique_ptr<ASTNode> w,
+                    std::vector<AggregateRequest> agg, 
+                    std::map<std::string, std::string> a)
+        : table_(std::move(t)), cols_(std::move(c)), where_(std::move(w)), 
+          aggs_(std::move(agg)), aliases_(std::move(a)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "READ", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        Result res = hm.resolveTablePath(table_);
+        if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
+        return TableManager::executeSelect(res.path, where_.get(),
+                                           cols_, aliases_, aggs_, cb);
+    }
+};
+
+class UpdateStatement : public Statement {
+    std::string                                 table_;
+    std::vector<std::pair<std::string,Value>>   asgn_;
+    std::unique_ptr<ASTNode>                    where_;
+public:
+    UpdateStatement(std::string t,
+                    std::vector<std::pair<std::string,Value>> a,
+                    std::unique_ptr<ASTNode> w)
+        : table_(std::move(t)), asgn_(std::move(a)), where_(std::move(w)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        Result res = hm.resolveTablePath(table_);
+        if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
+
+        Result r = TableManager::executeUpdate(res.path, where_.get(), asgn_);
+        if (r.isOk()) cb("[Success] " + r.details + "\n");
+        else          cb("[Error] "   + r.details + "\n");
+        return r;
+    }
+};
+
+class DeleteStatement : public Statement {
+    std::string              table_;
+    std::unique_ptr<ASTNode> where_;
+public:
+    DeleteStatement(std::string t, std::unique_ptr<ASTNode> w)
+        : table_(std::move(t)), where_(std::move(w)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, db_of(table_, fd), "WRITE", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        Result res = hm.resolveTablePath(table_);
+        if (!res.isOk()) { cb("[Error] " + res.details + "\n"); return res; }
+
+        Result r = TableManager::executeDelete(res.path, where_.get());
+        if (r.isOk()) cb("[Success] " + r.details + "\n");
+        else          cb("[Error] "   + r.details + "\n");
+        return r;
     }
 };
 
 class AuthStatement : public Statement {
     std::string user_, pass_;
 public:
-    AuthStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
+    AuthStatement(std::string u, std::string p)
+        : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        if (AuthManager::authenticate(user_, pass_, hm)) {
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        if (!AuthManager::authenticate(user_, pass_, hm)) {
+            cb("[Error] Неверный логин или пароль.\n");
+            return Result::Error(StatusCode::AUTH_FAILED, "Authentication failed");
+        }
+        std::string token = AuthManager::createToken(user_);
+        if (g_async_manager) g_async_manager->set_session_user(fd, user_);
 
-            std::string token = AuthManager::createToken(user_);
-            if (g_async_manager) g_async_manager->set_session_user(fd, user_);
-            cb("{\"status\":\"success\", \"token\":\"" + token + "\"}\n");
+        json resp = {{"status", "success"}, {"token", token}};
+        cb(resp.dump() + "\n");
+        return Result::Success();
+    }
+};
+
+class AuthJwtStatement : public Statement {
+    std::string token_;
+public:
+    explicit AuthJwtStatement(std::string t) : token_(std::move(t)) {}
+
+    Result execute(HierarchyManager&, int fd, OutputCallback cb) override {
+        try {
+            std::string user = AuthManager::verifyToken(token_);
+            if (g_async_manager) g_async_manager->set_session_user(fd, user);
+            json resp = {{"status", "success"}, {"user", user}, {"msg", "JWT verified"}};
+            cb(resp.dump() + "\n");
+            return Result::Success();
+        } catch (const DbException& e) {
+            json resp = {{"status", "error"}, {"msg", e.what()}};
+            cb(resp.dump() + "\n");
+            return Result::Error(e.code(), e.what());
+        }
+    }
+};
+
+class GetTaskStatusStatement : public Statement {
+    std::string guid_;
+public:
+    explicit GetTaskStatusStatement(std::string id) : guid_(std::move(id)) {}
+
+    Result execute(HierarchyManager&, int, OutputCallback cb) override {
+        if (!g_async_manager)
+            return Result::Error(StatusCode::INTERNAL_ERROR, "AsyncManager недоступен");
+
+        auto r = g_async_manager->fetch_result(guid_);
+
+        if (r.status == AsyncStatus::PENDING || r.status == AsyncStatus::PROCESSING) {
+            json resp = {{"status", "processing"}, {"guid", guid_}};
+            cb(resp.dump() + "\n");
             return Result::Success();
         }
-        return Result::Error(StatusCode::AUTH_FAILED, "Неверный логин или пароль");
+        if (r.status == AsyncStatus::COMPLETED) {
+            cb(r.data + "\n");
+            return {r.db_code, r.data};
+        }
+        json resp = {{"status", "error"}, {"msg", r.data}};
+        cb(resp.dump() + "\n");
+        return Result::Error(r.db_code, r.data);
     }
 };
 
 class CreateUserStatement : public Statement {
     std::string user_, pass_;
 public:
-    CreateUserStatement(std::string u, std::string p) : user_(std::move(u)), pass_(std::move(p)) {}
+    CreateUserStatement(std::string u, std::string p)
+        : user_(std::move(u)), pass_(std::move(p)) {}
 
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        std::string salt = AuthManager::generateRandomSalt();
-        std::string hash = AuthManager::hashPassword(pass_, salt);
-        
-        Row userRow;
-        userRow.push_back(Value(user_));
-        userRow.push_back(Value(hash));
-        userRow.push_back(Value(salt));
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
 
         auto res = hm.resolveTablePath("_system.users");
-        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "Системная БД не инициализирована");
+        if (!res.isOk()) {
+            cb("[Error] Системная БД не инициализирована.\n"); return res;
+        }
 
-        auto r = TableManager::insertRow(res.path, userRow);
+        std::string salt = AuthManager::generateRandomSalt();
+        Row row;
+        row.push_back(Value(user_));
+        row.push_back(Value(AuthManager::hashPassword(pass_, salt)));
+        row.push_back(Value(salt));
+
+        Result r = TableManager::insertRow(res.path, row);
         if (r.isOk()) cb("[Success] Пользователь '" + user_ + "' создан.\n");
+        else          cb("[Error] " + r.details + "\n");
         return r;
     }
 };
@@ -392,16 +506,16 @@ public:
     AlterDbAddGroupStatement(std::string db, std::string g)
         : db_(std::move(db)), group_(std::move(g)) {}
 
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
         auto res = hm.resolveTablePath("_system.groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
-        Row row;
-        row.push_back(Value(group_));
-        row.push_back(Value(db_));
-        
-        auto r = TableManager::insertRow(res.path, row);
-        if (r.isOk()) cb("[RBAC] Группа '" + group_ + "' создана в БД '" + db_ + "'.\n");
+        Row row; row.push_back(Value(group_)); row.push_back(Value(db_));
+        Result r = TableManager::insertRow(res.path, row);
+        if (r.isOk()) cb("[RBAC] Группа '" + group_ + "' создана для БД '" + db_ + "'.\n");
         return r;
     }
 };
@@ -412,114 +526,106 @@ public:
     AlterUserAddToGroupStatement(std::string u, std::string db, std::string g)
         : user_(std::move(u)), db_(std::move(db)), group_(std::move(g)) {}
 
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
         auto res = hm.resolveTablePath("_system.user_groups");
         if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
 
         Row row;
-        row.push_back(Value(user_));
-        row.push_back(Value(group_));
-        row.push_back(Value(db_));
-
-        auto r = TableManager::insertRow(res.path, row);
-        if (r.isOk()) cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '" + group_ + "' (БД: '" + db_ + "')\n");
+        row.push_back(Value(user_)); row.push_back(Value(group_)); row.push_back(Value(db_));
+        Result r = TableManager::insertRow(res.path, row);
+        if (r.isOk())
+            cb("[RBAC] Пользователь '" + user_ + "' добавлен в группу '"
+               + group_ + "' (БД: '" + db_ + "').\n");
         return r;
     }
 };
 
-class AlterUserAddPermStatement : public Statement {
-    std::string user_, db_;
-    std::vector<std::string> perms_;
+class GrantPermStatement : public Statement {
+    std::string              grantee_;
+    bool                     is_group_;
+    std::string              db_;
+    std::vector<std::string> actions_;
+public:
+    GrantPermStatement(std::string g, bool is_grp, std::string db,
+                        std::vector<std::string> a)
+        : grantee_(std::move(g)), is_group_(is_grp),
+          db_(std::move(db)), actions_(std::move(a)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        for (const auto& act : actions_) {
+            Row row;
+            row.push_back(Value(grantee_));
+            row.push_back(Value(is_group_ ? 1 : 0));
+            row.push_back(Value(db_));
+            row.push_back(Value(act));
+            Result r = TableManager::insertRow(res.path, row);
+            if (!r.isOk()) return r;
+        }
+        cb("[RBAC] Права выданы '" + grantee_ + "' для БД '" + db_ + "'.\n");
+        return Result::Success();
+    }
+};
+
+class RevokePermStatement : public Statement {
+    std::string              grantee_;
+    bool                     is_group_;
+    std::string              db_;
+    std::vector<std::string> actions_;
+public:
+    RevokePermStatement(std::string g, bool is_grp, std::string db,
+                         std::vector<std::string> a)
+        : grantee_(std::move(g)), is_group_(is_grp),
+          db_(std::move(db)), actions_(std::move(a)) {}
+
+    Result execute(HierarchyManager& hm, int fd, OutputCallback cb) override {
+        auto auth = requireAccess(fd, "_system", "ADMIN", hm);
+        if (!auth.isOk()) { cb("[Error] " + auth.details + "\n"); return auth; }
+
+        auto res = hm.resolveTablePath("_system.permissions");
+        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
+
+        for (const auto& act : actions_) {
+            auto cond = std::make_unique<LogicalNode>("AND",
+                std::make_unique<ComparisonNode>("grantee",  "==", Value(grantee_)),
+                std::make_unique<LogicalNode>("AND",
+                    std::make_unique<ComparisonNode>("is_group", "==", Value(is_group_ ? 1 : 0)),
+                    std::make_unique<LogicalNode>("AND",
+                        std::make_unique<ComparisonNode>("db_name", "==", Value(db_)),
+                        std::make_unique<ComparisonNode>("action",  "==", Value(act)))));
+            Result r = TableManager::executeDelete(res.path, cond.get());
+            if (!r.isOk()) return r;
+        }
+        cb("[RBAC] Права отозваны у '" + grantee_ + "' для БД '" + db_ + "'.\n");
+        return Result::Success();
+    }
+};
+
+class AlterUserAddPermStatement : public GrantPermStatement {
 public:
     AlterUserAddPermStatement(std::string u, std::string db, std::vector<std::string> p)
-        : user_(std::move(u)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        auto res = hm.resolveTablePath("_system.permissions");
-        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
-
-        for (const auto& perm : perms_) {
-            Row row;
-            row.push_back(Value(user_));
-            row.push_back(Value(0));
-            row.push_back(Value(db_));
-            row.push_back(Value(perm));
-            Result r = TableManager::insertRow(res.path, row);
-            if (!r.isOk()) return r;
-        }
-        cb("[RBAC] Права для пользователя '" + user_ + "' в БД '" + db_ + "' обновлены.\n");
-        return Result::Success();
-    }
+        : GrantPermStatement(std::move(u), false, std::move(db), std::move(p)) {}
 };
 
-class AlterGroupAddPermStatement : public Statement {
-    std::string group_, db_;
-    std::vector<std::string> perms_;
+class AlterGroupAddPermStatement : public GrantPermStatement {
 public:
     AlterGroupAddPermStatement(std::string g, std::string db, std::vector<std::string> p)
-        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager& hm, int fd, SQLParser::OutputCallback cb) override {
-        auto res = hm.resolveTablePath("_system.permissions");
-        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
-
-        for (const auto& perm : perms_) {
-            Row row;
-            row.push_back(Value(group_));
-            row.push_back(Value(1));
-            row.push_back(Value(db_));
-            row.push_back(Value(perm));
-            Result r = TableManager::insertRow(res.path, row);
-            if (!r.isOk()) return r;
-        }
-        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' добавлены.\n");
-        return Result::Success();
-    }
+        : GrantPermStatement(std::move(g), true, std::move(db), std::move(p)) {}
 };
 
-class AlterGroupDelPermStatement : public Statement {
-    std::string group_, db_;
-    std::vector<std::string> perms_;
+class AlterGroupDelPermStatement : public RevokePermStatement {
 public:
     AlterGroupDelPermStatement(std::string g, std::string db, std::vector<std::string> p)
-        : group_(std::move(g)), db_(std::move(db)), perms_(std::move(p)) {}
-
-    Result execute(HierarchyManager& hm, int, SQLParser::OutputCallback cb) override {
-        auto res = hm.resolveTablePath("_system.permissions");
-        if (!res.isOk()) return Result::Error(StatusCode::INTERNAL_ERROR, "RBAC не инициализирован");
-
-        for (const auto& perm : perms_) {
-            auto c1 = std::make_unique<ComparisonNode>("grantee", "==", Value(group_));
-            auto c2 = std::make_unique<ComparisonNode>("is_group", "==", Value(1));
-            auto c3 = std::make_unique<ComparisonNode>("db_name", "==", Value(db_));
-            auto c4 = std::make_unique<ComparisonNode>("action", "==", Value(perm));
-
-            auto and1 = std::make_unique<LogicalNode>("AND", std::move(c1), std::move(c2));
-            auto and2 = std::make_unique<LogicalNode>("AND", std::move(c3), std::move(c4));
-            auto final_cond = std::make_unique<LogicalNode>("AND", std::move(and1), std::move(and2));
-
-            Result r = TableManager::executeDelete(res.path, final_cond.get());
-            if (!r.isOk()) return r;
-        }
-        
-        cb("[RBAC] Права группы '" + group_ + "' в БД '" + db_ + "' отозваны.\n");
-        return Result::Success();
-    }
+        : RevokePermStatement(std::move(g), true, std::move(db), std::move(p)) {}
 };
 
-class AuthJwtStatement : public Statement {
-    std::string token_;
-public:
-    explicit AuthJwtStatement(std::string t) : token_(std::move(t)) {}
-    Result execute(HierarchyManager&, int, SQLParser::OutputCallback cb) override {
-        try {
-            std::string user = AuthManager::verifyToken(token_);
-            cb("{\"status\":\"success\", \"user\":\"" + user + "\", \"msg\":\"JWT Auth OK\"}\n");
-            return Result::Success();
-        } catch (const std::exception& e) {
-            return Result::Error(StatusCode::AUTH_FAILED, e.what());
-        }
-    }
-};
 
-#endif  // STATEMENTS_H
+#endif // STATEMENTS_H

@@ -2,12 +2,15 @@
 #include "TableManager.h"
 #include "ASTNode.h"
 #include "DbException.h"
+#include <nlohmann/json.hpp>
 #include <chrono>
 #include <sstream>
 #include <iomanip>
 #include <random>
 #include <cstring>
 
+using json = nlohmann::json;
+ 
 constexpr const char* AuthManager::SERVER_SECRET;
 
 std::string AuthManager::hashPassword(const std::string& password,
@@ -44,7 +47,10 @@ std::string AuthManager::base64_encode(const std::string& in) {
     int val = 0, valb = -6;
     for (unsigned char c : in) {
         val = (val << 8) + c; valb += 8;
-        while (valb >= 0) { out.push_back(lut[(val >> valb) & 0x3F]); valb -= 6; }
+        while (valb >= 0) { 
+            out.push_back(lut[(val >> valb) & 0x3F]); 
+            valb -= 6; 
+        }
     }
     if (valb > -6) out.push_back(lut[((val << 8) >> (valb + 8)) & 0x3F]);
     return out;
@@ -60,29 +66,38 @@ std::string AuthManager::base64_decode(const std::string& in) {
     for (unsigned char c : in) {
         if (T[c] == -1) break;
         val = (val << 6) + T[c]; valb += 6;
-        if (valb >= 0) { out.push_back(static_cast<char>((val >> valb) & 0xFF)); valb -= 8; }
+        if (valb >= 0) { 
+            out.push_back(static_cast<char>((val >> valb) & 0xFF)); 
+            valb -= 8; 
+        }
     }
     return out;
 }
 
-std::string AuthManager::extractJsonValue(const std::string& json,
-                                           const std::string& key) {
-    if (json.empty()) return "";
-    std::string sk = "\"" + key + "\":";
-    size_t p = json.find(sk);
-    if (p == std::string::npos) return "";
-    p += sk.size();
-    while (p < json.size() && (json[p] == ' ' || json[p] == '"')) ++p;
-    size_t e = p;
-    while (e < json.size() && json[e] != '"' && json[e] != ',' && json[e] != '}') ++e;
-    return json.substr(p, e - p);
+std::vector<json> AuthManager::parseSelectOutput(const std::string& raw) {
+    std::vector<json> rows;
+    if (raw.empty()) return rows;
+    try {
+        json arr = json::parse(raw);
+        if (arr.is_array()) {
+            for (const auto& item : arr)
+                if (item.is_object()) rows.push_back(item);
+        }
+    } catch (...) {
+    }
+    return rows;
 }
 
 std::string AuthManager::createToken(const std::string& username) {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::string hdr = base64_encode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
-    std::string pay = base64_encode(
-        "{\"user\":\"" + username + "\",\"iat\":" + std::to_string(now) + "}");
+    json payload_obj = {
+        {"user", username},
+        {"iat",  static_cast<int64_t>(now)}
+    };
+    json header_obj = {{"alg", "HS256"}, {"typ", "JWT"}};
+ 
+    std::string hdr = base64_encode(header_obj.dump());
+    std::string pay = base64_encode(payload_obj.dump());
     std::string sig = hashPassword(hdr + "." + pay, "jwt_signature_salt");
     return hdr + "." + pay + "." + sig;
 }
@@ -90,19 +105,28 @@ std::string AuthManager::createToken(const std::string& username) {
 std::string AuthManager::verifyToken(const std::string& token) {
     size_t fd = token.find('.');
     size_t ld = token.rfind('.');
-    if (fd == std::string::npos || ld == std::string::npos || fd == ld)
+    if (fd == std::string::npos || ld == std::string::npos || fd == ld){
         throw DbException(StatusCode::AUTH_FAILED, "Некорректный формат токена");
+    }
 
     std::string hp  = token.substr(0, ld);
     std::string sig = token.substr(ld + 1);
     if (sig != hashPassword(hp, "jwt_signature_salt"))
         throw DbException(StatusCode::AUTH_FAILED, "Подпись токена не совпадает");
 
-    std::string payload = base64_decode(token.substr(fd + 1, ld - fd - 1));
-    std::string username = extractJsonValue(payload, "user");
-    if (username.empty())
-        throw DbException(StatusCode::AUTH_FAILED, "Повреждён payload токена");
-    return username;
+    std::string payload_raw = base64_decode(token.substr(fd + 1, ld - fd - 1));
+ 
+    try {
+        json payload = json::parse(payload_raw);
+        if (!payload.contains("user") || !payload["user"].is_string()){
+            throw DbException(StatusCode::AUTH_FAILED, "Повреждён payload токена");
+        }
+        return payload["user"].get<std::string>();
+    } catch (const DbException&) {
+        throw;
+    } catch (...) {
+        throw DbException(StatusCode::AUTH_FAILED, "Ошибка разбора payload токена");
+    }
 }
 
 void AuthManager::initSystem(HierarchyManager& hm) {
@@ -173,18 +197,21 @@ bool AuthManager::authenticate(const std::string& username,
 
     auto cond = std::make_unique<ComparisonNode>("login", "==", Value(username));
 
-    std::string db_hash, db_salt;
-    auto cb = [&](const std::string& row) {
-        if (row.find('{') != std::string::npos) {
-            db_hash = extractJsonValue(row, "pass_hash");
-            db_salt = extractJsonValue(row, "salt");
-        }
-    };
-    auto r = TableManager::executeSelect(path_res.path, cond.get(),
-                                {"pass_hash", "salt"}, {}, {}, cb);
-    r.throw_if_error();
+    std::string raw_output;
+    auto cb = [&](const std::string& chunk) { raw_output += chunk; };
+ 
+    TableManager::executeSelect(
+        path_res.path, cond.get(), {"pass_hash", "salt"}, {}, {}, cb);
 
-    if (db_hash.empty() || db_salt.empty()) return false;
+    auto rows = parseSelectOutput(raw_output);
+    if (rows.empty()) return false;
+ 
+    const json& row = rows[0];
+    if (!row.contains("pass_hash") || !row.contains("salt")) return false;
+ 
+    std::string db_hash = row["pass_hash"].get<std::string>();
+    std::string db_salt = row["salt"].get<std::string>();
+ 
     return hashPassword(password, db_salt) == db_hash;
 }
 
@@ -201,56 +228,56 @@ bool AuthManager::checkAccess(const std::string& username,
     Result ug_path   = hm.resolveTablePath("_system.user_groups",  SYS_FD);
     if (!perm_path.isOk() || !ug_path.isOk()) return false;
 
-    bool granted = false;
-    auto check_cb = [&](const std::string& r) {
-        if (r.find('{') != std::string::npos) granted = true;
+    auto has_match = [&](const std::string& path,
+                          std::unique_ptr<ASTNode> cond) -> bool {
+        std::string raw;
+        auto cb = [&](const std::string& s) { raw += s; };
+        TableManager::executeSelect(path, cond.get(), {}, {}, {}, cb);
+        return !parseSelectOutput(raw).empty();
     };
 
-    {
-        auto c = std::make_unique<LogicalNode>("AND",
-            std::make_unique<ComparisonNode>("grantee", "==", Value(std::string("PUBLIC"))),
+    if (has_match(perm_path.path,
             std::make_unique<LogicalNode>("AND",
-                std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
-                std::make_unique<ComparisonNode>("action",  "==", Value(action))));
-        auto r = TableManager::executeSelect(perm_path.path, c.get(), {"grantee"}, {}, {}, check_cb);
-        r.throw_if_error();
-        
-        if (granted) return true;
-    }
-
-    {
-        auto c = std::make_unique<LogicalNode>("AND",
-            std::make_unique<ComparisonNode>("grantee",  "==", Value(username)),
-            std::make_unique<LogicalNode>("AND",
-                std::make_unique<ComparisonNode>("is_group", "==", Value(0)),
+                std::make_unique<ComparisonNode>("grantee",  "==", Value(std::string("PUBLIC"))),
                 std::make_unique<LogicalNode>("AND",
                     std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
-                    std::make_unique<ComparisonNode>("action",  "==", Value(action)))));
-        TableManager::executeSelect(perm_path.path, c.get(), {"grantee"}, {}, {}, check_cb);
-        if (granted) return true;
-    }
+                    std::make_unique<ComparisonNode>("action",  "==", Value(action))))))
+        return true;
+
+    if (has_match(perm_path.path,
+            std::make_unique<LogicalNode>("AND",
+                std::make_unique<ComparisonNode>("grantee",  "==", Value(username)),
+                std::make_unique<LogicalNode>("AND",
+                    std::make_unique<ComparisonNode>("is_group", "==", Value(0)),
+                    std::make_unique<LogicalNode>("AND",
+                        std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
+                        std::make_unique<ComparisonNode>("action",  "==", Value(action)))))))
+        return true;
 
     std::vector<std::string> groups;
     {
+        std::string raw;
+        auto cb = [&](const std::string& s) { raw += s; };
         auto gc = std::make_unique<ComparisonNode>("username", "==", Value(username));
-        TableManager::executeSelect(ug_path.path, gc.get(), {"group_name"}, {}, {},
-            [&](const std::string& r) {
-                std::string g = extractJsonValue(r, "group_name");
-                if (!g.empty()) groups.push_back(g);
-            });
+        TableManager::executeSelect(ug_path.path, gc.get(), {"group_name"}, {}, {}, cb);
+ 
+        for (const auto& row : parseSelectOutput(raw)) {
+            if (row.contains("group_name") && row["group_name"].is_string())
+                groups.push_back(row["group_name"].get<std::string>());
+        }
     }
 
     for (const auto& grp : groups) {
-        auto c = std::make_unique<LogicalNode>("AND",
-            std::make_unique<ComparisonNode>("grantee",  "==", Value(grp)),
-            std::make_unique<LogicalNode>("AND",
-                std::make_unique<ComparisonNode>("is_group", "==", Value(1)),
+        if (has_match(perm_path.path,
                 std::make_unique<LogicalNode>("AND",
-                    std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
-                    std::make_unique<ComparisonNode>("action",  "==", Value(action)))));
-        TableManager::executeSelect(perm_path.path, c.get(), {"grantee"}, {}, {}, check_cb);
-        if (granted) return true;
+                    std::make_unique<ComparisonNode>("grantee",  "==", Value(grp)),
+                    std::make_unique<LogicalNode>("AND",
+                        std::make_unique<ComparisonNode>("is_group", "==", Value(1)),
+                        std::make_unique<LogicalNode>("AND",
+                            std::make_unique<ComparisonNode>("db_name", "==", Value(resource)),
+                            std::make_unique<ComparisonNode>("action",  "==", Value(action)))))))
+            return true;
     }
-
+ 
     return false;
 }

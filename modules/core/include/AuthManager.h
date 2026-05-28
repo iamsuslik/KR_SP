@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "HierarchyManager.h"
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
@@ -32,7 +33,7 @@ private:
 
     static std::string base64_encode(const std::string& in);
     static std::string base64_decode(const std::string& in);
-    static std::string extractJsonValue(const std::string& json, const std::string& key);
+    static std::vector<nlohmann::json> parseSelectOutput(const std::string& raw);
 };
 
 #endif // AUTH_MANAGER_H
