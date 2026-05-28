@@ -1,43 +1,43 @@
 #pragma once
 
-#include "common.h"
 #include <string>
 
+#include "common.h"
+
 struct AsyncResult {
-    AsyncStatus status;
-    std::string data;
-    StatusCode  db_code;
-    std::string completion_time;
+  AsyncStatus status;
+  std::string data;
+  StatusCode db_code;
+  std::string completion_time;
 };
 
 class AsyncManager {
-    
-public:
-    AsyncManager();
-    ~AsyncManager();
+ public:
+  AsyncManager();
+  ~AsyncManager();
 
-    std::string register_task();
-    void update_task(const std::string& guid, AsyncStatus status, StatusCode code, const std::string& result_json);
-    AsyncResult fetch_result(const std::string& guid);
+  std::string register_task();
+  void update_task(const std::string& guid, AsyncStatus status, StatusCode code,
+                   const std::string& result_json);
+  AsyncResult fetch_result(const std::string& guid);
 
+  void close_session(const std::string& token);
 
-    void close_session(const std::string& token);
+  int find_idle_node() const;
 
-    int find_idle_node() const;
+  SharedMemoryLayout* getLayout() const;
 
-    SharedMemoryLayout* getLayout() const;
+  void set_session_db(const std::string& token, const std::string& db_name);
+  std::string get_session_db(const std::string& token);
 
-    void set_session_db(const std::string& token, const std::string& db_name);
-    std::string get_session_db(const std::string& token);
+  // void set_session_user(int fd, const std::string& username);
+  // std::string get_session_user(int fd);
 
-    // void set_session_user(int fd, const std::string& username);
-    // std::string get_session_user(int fd);
+ private:
+  SharedMemoryLayout* layout_ = nullptr;
+  SharedTaskSlot* shared_array = nullptr;
+  size_t total_size = 0;
 
-private:
-    SharedMemoryLayout* layout_ = nullptr;
-    SharedTaskSlot* shared_array = nullptr;
-    size_t total_size = 0;
-
-    static std::string generate_guid_v4();
-    SharedTaskSlot* find_free_slot();
+  static std::string generate_guid_v4();
+  SharedTaskSlot* find_free_slot();
 };

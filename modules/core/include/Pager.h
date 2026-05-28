@@ -1,38 +1,39 @@
 #ifndef PAGER_H
 #define PAGER_H
 
-#include <string>
-#include <vector>
 #include <cstdint>
 #include <filesystem>
+#include <string>
+#include <vector>
+
 #include "common.h"
 
 namespace fs = std::filesystem;
 
 class Pager {
-private:
-    fs::path filename;
-    int fd;
-    uint32_t page_count;
+ private:
+  fs::path filename;
+  int fd;
+  uint32_t page_count;
 
-    uint64_t get_page_offset(uint32_t page_id) const;
+  uint64_t get_page_offset(uint32_t page_id) const;
 
-public:
-    explicit Pager(const fs::path& db_path);
-    ~Pager();
+ public:
+  explicit Pager(const fs::path& db_path);
+  ~Pager();
 
-    Result read_page(uint32_t page_id, void* buffer);
-    Result write_page(uint32_t page_id, const void* buffer);
+  Result read_page(uint32_t page_id, void* buffer);
+  Result write_page(uint32_t page_id, const void* buffer);
 
-    uint32_t allocate_page();
+  uint32_t allocate_page();
 
-    uint32_t get_page_count() const { return page_count; }
-    std::string get_filename() const { return filename.string(); }
+  uint32_t get_page_count() const { return page_count; }
+  std::string get_filename() const { return filename.string(); }
 
-    int get_fd() const { return fd; }
+  int get_fd() const { return fd; }
 
-    Pager(const Pager&) = delete;
-    Pager& operator=(const Pager&) = delete;
+  Pager(const Pager&) = delete;
+  Pager& operator=(const Pager&) = delete;
 };
 
-#endif // PAGER_H
+#endif  // PAGER_H
